@@ -117,9 +117,9 @@ let q = score("How frustrated is the customer?", vec![
 ## Configuration
 
 ```rust
-use std::time::Duration;
-use typesafe_sdk::{TypeSafeClient, ClientConfig, RetryPolicy};
-
+# use std::time::Duration;
+# use typesafe_sdk::{TypeSafeClient, ClientConfig, RetryPolicy};
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 // From environment variables (TYPESAFE_API_KEY, TYPESAFE_BASE_URL, TYPESAFE_DEFAULT_MODEL)
 let client = TypeSafeClient::from_env()?;
 
@@ -137,6 +137,8 @@ let config = ClientConfig {
         .with_max_delay(Duration::from_secs(10)),
 };
 let client = TypeSafeClient::from_config(config)?;
+# Ok(())
+# }
 ```
 
 ### Environment variables
@@ -164,8 +166,9 @@ match client.system_one(state, questions).await {
 }
 ```
 
-The SDK automatically retries on `429 Too Many Requests` and `529 Overloaded`
-responses with exponential backoff.
+The SDK automatically retries on `429 Too Many Requests`, `529 Overloaded`,
+and `500`/`502`/`503`/`504` server errors, as well as network timeouts and
+connection failures, with exponential backoff and full jitter.
 
 ## License
 

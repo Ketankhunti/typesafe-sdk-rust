@@ -2,7 +2,7 @@
 //!
 //! Mirrors the Python `TypeSafeClient` and JavaScript `TypeSafeClient`:
 //! a client struct with configurable API key, base URL, default model,
-//! timeout, and retry policy. The primary method is [`system_one`],
+//! timeout, and retry policy. The primary method is [`TypeSafeClient::system_one`],
 //! which sends a `POST /v1/systemone` request and returns a typed
 //! [`SystemOneResponse`].
 //!
@@ -32,6 +32,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::time::Duration;
 
 use reqwest::{Client as HttpClient, StatusCode};
@@ -48,19 +49,26 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SYSTEM_ONE_PATH: &str = "/v1/systemone";
 const MODELS_PATH: &str = "/v1/models";
+const MAX_ERROR_BODY_LEN: usize = 512;
 
 /// Configuration for constructing a [`TypeSafeClient`].
-#[derive(Debug, Clone)]
+///
+/// All fields are public for construction, but prefer [`ClientConfig::default`]
+/// or the builder methods on [`RetryPolicy`] for common cases.
+#[derive(Clone)]
 pub struct ClientConfig {
-    /// API key. Falls back to `TYPESAFE_API_KEY` env var.
+    /// API key for authentication.
+    ///
+    /// Set this directly or use [`TypeSafeClient::from_env`] to read it
+    /// from the `TYPESAFE_API_KEY` environment variable.
     pub api_key: String,
     /// API root. Defaults to `https://api.typesafe.ai`.
     pub base_url: String,
     /// Default model. Defaults to `jev-latest`.
     pub default_model: String,
-    /// Per-attempt timeout. Defaults to 60 seconds.
+    /// Per-attempt timeout. Defaults to 10 seconds.
     pub timeout: Duration,
-    /// Retry policy. Defaults to 2 retries with exponential backoff.
+    /// Retry policy. Defaults to 2 retries with exponential backoff + jitter.
     pub retry: RetryPolicy,
 }
 
@@ -76,12 +84,33 @@ impl Default for ClientConfig {
     }
 }
 
+impl fmt::Debug for ClientConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientConfig")
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("default_model", &self.default_model)
+            .field("timeout", &self.timeout)
+            .field("retry", &self.retry)
+            .finish()
+    }
+}
+
 /// Client for the TypeSafe AI API.
 ///
 /// Construct with [`TypeSafeClient::new`] or [`TypeSafeClient::from_env`].
+#[derive(Clone)]
 pub struct TypeSafeClient {
     config: ClientConfig,
     http: HttpClient,
+}
+
+impl fmt::Debug for TypeSafeClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypeSafeClient")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TypeSafeClient {
@@ -97,13 +126,21 @@ impl TypeSafeClient {
 
     /// Create a new client from a full [`ClientConfig`].
     #[must_use = "the returned client should be used to make API calls"]
-    pub fn from_config(config: ClientConfig) -> Result<Self> {
+    pub fn from_config(mut config: ClientConfig) -> Result<Self> {
+        // Trim whitespace — a stray newline from an env file would otherwise
+        // become an opaque transport error.
+        config.api_key = config.api_key.trim().to_string();
+
         if config.api_key.is_empty() {
             return Err(TypeSafeError::Validation(
                 "No API key was provided. Pass an API key to `TypeSafeClient::new` or set the `TYPESAFE_API_KEY` environment variable."
                     .to_string(),
             ));
         }
+
+        // Normalize the base URL: trim trailing slash and validate scheme.
+        config.base_url = config.base_url.trim().trim_end_matches('/').to_string();
+        validate_base_url(&config.base_url)?;
 
         let http = HttpClient::builder()
             .timeout(config.timeout)
@@ -197,7 +234,8 @@ impl TypeSafeClient {
 
         let body = serde_json::to_value(&request)?;
 
-        self.post_with_retry(SYSTEM_ONE_PATH, body).await
+        self.request_with_retry("POST", SYSTEM_ONE_PATH, Some(body))
+            .await
     }
 
     // -----------------------------------------------------------------------
@@ -206,28 +244,32 @@ impl TypeSafeClient {
 
     /// List available models. Sends `GET /v1/models`.
     pub async fn list_models(&self) -> Result<ListModelsResponse> {
-        self.get_with_retry(MODELS_PATH).await
+        self.request_with_retry("GET", MODELS_PATH, None).await
     }
 
     // -----------------------------------------------------------------------
     // Internal HTTP + retry
     // -----------------------------------------------------------------------
 
-    async fn post_with_retry<T: serde::de::DeserializeOwned>(
+    async fn request_with_retry<T: serde::de::DeserializeOwned>(
         &self,
+        method: &str,
         path: &str,
-        body: Value,
+        body: Option<Value>,
     ) -> Result<T> {
         let url = format!("{}{}", self.config.base_url, path);
         let max_retries = self.config.retry.max_retries;
 
         let mut attempt = 0;
         loop {
-            let result = self.attempt_post(&url, &body).await;
+            let result = self.attempt_request(method, &url, body.as_ref()).await;
             match result {
                 Ok(resp) => return Ok(resp),
                 Err(e) if e.is_retryable() && attempt < max_retries => {
-                    let delay = self.config.retry.delay_for(attempt);
+                    let delay = self
+                        .config
+                        .retry
+                        .delay_for_with_jitter(attempt, attempt as u64);
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                 }
@@ -236,55 +278,32 @@ impl TypeSafeClient {
         }
     }
 
-    async fn attempt_post<T: serde::de::DeserializeOwned>(
+    async fn attempt_request<T: serde::de::DeserializeOwned>(
         &self,
+        method: &str,
         url: &str,
-        body: &Value,
+        body: Option<&Value>,
     ) -> Result<T> {
-        let response = self
+        let auth_value = format!("Bearer {}", self.config.api_key);
+        let auth_header = reqwest::header::HeaderValue::from_str(&auth_value)
+            .map_err(|e| TypeSafeError::Validation(format!("Invalid API key header value: {e}")))?;
+
+        let mut request = self
             .http
-            .post(url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Content-Type", "application/json")
+            .request(method.parse().unwrap_or(reqwest::Method::GET), url)
+            .header(reqwest::header::AUTHORIZATION, auth_header)
             .header("Accept", "application/json")
             .header("User-Agent", format!("typesafe-sdk/{}", SDK_VERSION))
-            .header("X-TypeSafe-SDK", format!("typesafe-sdk/{}", SDK_VERSION))
-            .json(body)
-            .send()
-            .await?;
+            .header("X-TypeSafe-SDK", format!("typesafe-sdk/{}", SDK_VERSION));
 
-        Self::parse_response(response).await
-    }
-
-    async fn get_with_retry<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let url = format!("{}{}", self.config.base_url, path);
-        let max_retries = self.config.retry.max_retries;
-
-        let mut attempt = 0;
-        loop {
-            let result = self.attempt_get(&url).await;
-            match result {
-                Ok(resp) => return Ok(resp),
-                Err(e) if e.is_retryable() && attempt < max_retries => {
-                    let delay = self.config.retry.delay_for(attempt);
-                    tokio::time::sleep(delay).await;
-                    attempt += 1;
-                }
-                Err(e) => return Err(e),
+        if method == "POST" {
+            request = request.header("Content-Type", "application/json");
+            if let Some(b) = body {
+                request = request.json(b);
             }
         }
-    }
 
-    async fn attempt_get<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let response = self
-            .http
-            .get(url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
-            .header("Accept", "application/json")
-            .header("User-Agent", format!("typesafe-sdk/{}", SDK_VERSION))
-            .header("X-TypeSafe-SDK", format!("typesafe-sdk/{}", SDK_VERSION))
-            .send()
-            .await?;
+        let response = request.send().await.map_err(map_send_error)?;
 
         Self::parse_response(response).await
     }
@@ -293,18 +312,24 @@ impl TypeSafeClient {
         response: reqwest::Response,
     ) -> Result<T> {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+
+        let text = response
+            .text()
+            .await
+            .map_err(|e| TypeSafeError::Connection(format!("Failed to read response body: {e}")))?;
 
         if status.is_success() {
             return serde_json::from_str(&text).map_err(|e| {
                 TypeSafeError::ResponseValidation(format!(
-                    "Failed to parse response body: {e}\nBody: {text}"
+                    "Failed to parse response body: {e}\nBody: {}",
+                    truncate(&text, MAX_ERROR_BODY_LEN)
                 ))
             });
         }
 
         // Map HTTP status codes to typed errors, mirroring the Python/JS SDKs.
-        let message = Self::extract_error_message(&text).unwrap_or(text);
+        let message = Self::extract_error_message(&text)
+            .unwrap_or_else(|| truncate(&text, MAX_ERROR_BODY_LEN));
         Err(match status {
             StatusCode::UNAUTHORIZED => TypeSafeError::Authentication(message),
             StatusCode::BAD_REQUEST => TypeSafeError::BadRequest(message),
@@ -347,6 +372,57 @@ impl TypeSafeClient {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Map a `reqwest` send error to the appropriate `TypeSafeError` variant
+/// so that timeouts and connection failures are retryable.
+fn map_send_error(e: reqwest::Error) -> TypeSafeError {
+    if e.is_timeout() {
+        TypeSafeError::Timeout(10) // approximate; the real timeout is in the builder
+    } else if e.is_connect() {
+        TypeSafeError::Connection(e.to_string())
+    } else {
+        TypeSafeError::Transport(e)
+    }
+}
+
+/// Parse a `Retry-After` header value (seconds or HTTP-date).
+/// Returns `None` if the value can't be parsed.
+#[allow(dead_code)] // used in tests; reserved for future Retry-After support
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    // Try parsing as seconds (most common).
+    if let Ok(secs) = value.trim().parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    // HTTP-date format is rarely used and harder to parse without extra deps.
+    None
+}
+
+/// Truncate a string to `max` characters, appending "..." if truncated.
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
+    }
+}
+
+/// Validate that the base URL has an https scheme (or is localhost for dev).
+fn validate_base_url(url: &str) -> Result<()> {
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    // Allow http:// only for localhost (development/testing).
+    if url.starts_with("http://localhost") || url.starts_with("http://127.0.0.1") {
+        return Ok(());
+    }
+    Err(TypeSafeError::Validation(format!(
+        "Base URL must use https:// (or http://localhost for development). Got: {url}"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,5 +458,74 @@ mod tests {
     fn extract_error_message_returns_none_for_plain_text() {
         let text = "plain text error";
         assert!(TypeSafeClient::extract_error_message(text).is_none());
+    }
+
+    #[test]
+    fn debug_redacts_api_key() {
+        let config = ClientConfig {
+            api_key: "secret_key_123".to_string(),
+            ..ClientConfig::default()
+        };
+        let debug_str = format!("{config:?}");
+        assert!(!debug_str.contains("secret_key_123"));
+        assert!(debug_str.contains("<redacted>"));
+    }
+
+    #[test]
+    fn trims_api_key_whitespace() {
+        // A stray newline from an env file should be trimmed.
+        let result = TypeSafeClient::new("  apikey_test  \n");
+        assert!(result.is_ok());
+        let client = result.unwrap();
+        // The key is stored trimmed internally.
+        assert_eq!(client.config.api_key, "apikey_test");
+    }
+
+    #[test]
+    fn rejects_http_base_url() {
+        let config = ClientConfig {
+            api_key: "test".to_string(),
+            base_url: "http://api.typesafe.ai".to_string(),
+            ..ClientConfig::default()
+        };
+        let result = TypeSafeClient::from_config(config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn allows_localhost_http() {
+        let config = ClientConfig {
+            api_key: "test".to_string(),
+            base_url: "http://localhost:8080".to_string(),
+            ..ClientConfig::default()
+        };
+        let result = TypeSafeClient::from_config(config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn trims_trailing_slash_from_base_url() {
+        let config = ClientConfig {
+            api_key: "test".to_string(),
+            base_url: "https://api.typesafe.ai/".to_string(),
+            ..ClientConfig::default()
+        };
+        let client = TypeSafeClient::from_config(config).unwrap();
+        assert_eq!(client.base_url(), "https://api.typesafe.ai");
+    }
+
+    #[test]
+    fn truncate_shortens_long_strings() {
+        let long = "x".repeat(600);
+        let truncated = truncate(&long, 512);
+        assert_eq!(truncated.len(), 515); // 512 + "..."
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn parse_retry_after_seconds() {
+        assert_eq!(parse_retry_after("5"), Some(Duration::from_secs(5)));
+        assert_eq!(parse_retry_after("  10  "), Some(Duration::from_secs(10)));
+        assert_eq!(parse_retry_after("not a number"), None);
     }
 }

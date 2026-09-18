@@ -40,7 +40,12 @@ pub enum TypeSafeError {
 
     /// A generic API error for unexpected HTTP status codes.
     #[error("API error (status {status}): {message}")]
-    Api { status: u16, message: String },
+    Api {
+        /// The HTTP status code.
+        status: u16,
+        /// The error message from the server.
+        message: String,
+    },
 
     /// The request could not connect or timed out after all retries.
     #[error("connection error: {0}")]
@@ -70,7 +75,7 @@ pub enum TypeSafeError {
 
 impl TypeSafeError {
     /// Returns `true` if this error is retryable (rate limit, overload,
-    /// server error, or connection failure).
+    /// server error, connection failure, or timeout).
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -79,6 +84,7 @@ impl TypeSafeError {
                 | TypeSafeError::InternalServer(_)
                 | TypeSafeError::Connection(_)
                 | TypeSafeError::Timeout(_)
+                | TypeSafeError::Transport(_)
         )
     }
 }

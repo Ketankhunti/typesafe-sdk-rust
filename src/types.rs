@@ -22,8 +22,11 @@ use crate::questions::Question;
 /// - `questions` — non-empty map of question names to question objects.
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemOneRequest {
+    /// Text, a JSON object, or an array to evaluate.
     pub state: Value,
+    /// The model name or alias (e.g. `"jev-latest"`).
     pub model: String,
+    /// Non-empty map of question names to question objects.
     pub questions: HashMap<String, Question>,
 }
 
@@ -34,7 +37,9 @@ pub struct SystemOneRequest {
 /// Token usage for a request.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Usage {
+    /// Number of input tokens consumed.
     pub input_tokens: u64,
+    /// Number of output tokens generated.
     pub output_tokens: u64,
 }
 
@@ -74,12 +79,20 @@ pub struct ScoreAnswer {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum Answer {
+    /// A yes/no answer.
     #[serde(rename = "noul")]
     Noul(NoulAnswer),
+    /// A multiple-choice answer.
     #[serde(rename = "choice")]
     Choice(ChoiceAnswer),
+    /// A rubric-based score answer.
     #[serde(rename = "score")]
     Score(ScoreAnswer),
+    /// An unknown answer type returned by a newer API version.
+    /// This prevents deserialization failures when the server adds new
+    /// primitives that this SDK version doesn't yet know about.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Answer {
@@ -166,6 +179,21 @@ impl SystemOneResponse {
             .filter_map(|(k, v)| v.as_score().map(|s| (k.as_str(), s)))
             .collect()
     }
+
+    /// Returns the noul answer for the given question name, if it exists.
+    pub fn noul(&self, name: &str) -> Option<&NoulAnswer> {
+        self.answers.get(name).and_then(|a| a.as_noul())
+    }
+
+    /// Returns the choice answer for the given question name, if it exists.
+    pub fn choice(&self, name: &str) -> Option<&ChoiceAnswer> {
+        self.answers.get(name).and_then(|a| a.as_choice())
+    }
+
+    /// Returns the score answer for the given question name, if it exists.
+    pub fn score(&self, name: &str) -> Option<&ScoreAnswer> {
+        self.answers.get(name).and_then(|a| a.as_score())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -175,7 +203,9 @@ impl SystemOneResponse {
 /// Metadata for an available model.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelCard {
+    /// The model name or alias.
     pub name: String,
+    /// Human-readable description of the model.
     pub description: String,
     /// Release date of the model, if available.
     #[serde(default)]
@@ -185,6 +215,7 @@ pub struct ModelCard {
 /// The response from `GET /v1/models`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListModelsResponse {
+    /// List of available models.
     pub models: Vec<ModelCard>,
 }
 
@@ -246,5 +277,28 @@ mod tests {
         assert_eq!(resp.choices().len(), 1);
         assert!((resp.nouls()["billing"].noul - 0.98).abs() < 1e-9);
         assert_eq!(resp.choices()["tone"].choice, "calm");
+    }
+
+    #[test]
+    fn deserialize_unknown_answer_type() {
+        let json = r#"{"type":"future_primitive","data":"something"}"#;
+        let answer: Answer = serde_json::from_str(json).unwrap();
+        assert!(matches!(answer, Answer::Unknown));
+    }
+
+    #[test]
+    fn safe_accessors_return_none_for_missing() {
+        let json = r#"{
+            "model": "jev-latest",
+            "answers": {
+                "billing": {"type":"noul","noul":0.98}
+            },
+            "usage": {"input_tokens":10,"output_tokens":2}
+        }"#;
+        let resp: SystemOneResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.noul("billing").is_some());
+        assert!(resp.noul("nonexistent").is_none());
+        assert!(resp.choice("billing").is_none());
+        assert!(resp.score("billing").is_none());
     }
 }

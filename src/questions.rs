@@ -61,7 +61,8 @@ impl Noul {
     /// Create a new noul question with the given instructions.
     ///
     /// `instructions` can be a string, `null`, or any JSON value.
-    /// Pass `None` to omit instructions entirely (the API defaults to `null`).
+    /// Pass [`serde_json::Value::Null`] to explicitly send `null` as the
+    /// instructions (the API default).
     pub fn new(instructions: impl Into<Value>) -> Self {
         Self {
             instructions: Some(instructions.into()),
@@ -148,10 +149,13 @@ impl Score {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Question {
+    /// A yes/no question.
     #[serde(rename = "noul")]
     Noul(Noul),
+    /// A multiple-choice question.
     #[serde(rename = "choice")]
     Choice(Choice),
+    /// A rubric-based score question.
     #[serde(rename = "score")]
     Score(Score),
 }
@@ -228,6 +232,7 @@ pub fn score(instructions: impl Into<Value>, criteria: Vec<Description>) -> Scor
 ///
 /// Mirrors the JS SDK's `validateQuestions`:
 /// - Questions must not be empty.
+/// - Choice criteria must have at least two entries.
 /// - Score criteria must be an array with at least two entries.
 pub(crate) fn validate_questions(
     questions: &HashMap<String, Question>,
@@ -239,14 +244,24 @@ pub(crate) fn validate_questions(
     }
 
     for (name, question) in questions {
-        if let Question::Score(score) = question {
-            if score.criteria.len() < 2 {
-                return Err(crate::error::TypeSafeError::Validation(format!(
-                    "Score question \"{}\" has {} criteria; at least two scores are required.",
-                    name,
-                    score.criteria.len()
-                )));
+        match question {
+            Question::Choice(choice) => {
+                if choice.criteria.len() < 2 {
+                    return Err(crate::error::TypeSafeError::Validation(format!(
+                        "Choice question \"{name}\" has {} criteria; at least two choices are required.",
+                        choice.criteria.len()
+                    )));
+                }
             }
+            Question::Score(score) => {
+                if score.criteria.len() < 2 {
+                    return Err(crate::error::TypeSafeError::Validation(format!(
+                        "Score question \"{name}\" has {} criteria; at least two scores are required.",
+                        score.criteria.len()
+                    )));
+                }
+            }
+            Question::Noul(_) => {}
         }
     }
 
@@ -331,12 +346,30 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_choice_with_fewer_than_two_criteria() {
+        let mut questions = HashMap::new();
+        let mut criteria = HashMap::new();
+        criteria.insert("only".to_string(), None);
+        questions.insert("q".to_string(), Question::Choice(choice("?", criteria)));
+        let result = validate_questions(&questions);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("at least two"));
+    }
+
+    #[test]
     fn validate_accepts_valid_questions() {
         let mut questions = HashMap::new();
         questions.insert("q".to_string(), Question::Noul(noul("?")));
         questions.insert(
             "s".to_string(),
             Question::Score(score("?", vec![Some("low".into()), Some("high".into())])),
+        );
+        let mut choice_criteria = HashMap::new();
+        choice_criteria.insert("a".to_string(), None);
+        choice_criteria.insert("b".to_string(), None);
+        questions.insert(
+            "c".to_string(),
+            Question::Choice(choice("?", choice_criteria)),
         );
         assert!(validate_questions(&questions).is_ok());
     }

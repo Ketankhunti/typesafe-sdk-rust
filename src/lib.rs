@@ -31,6 +31,9 @@
 //! - [`choice`] — multiple-choice → label, probabilities, confidence
 //! - [`score`] — rubric-based → numeric score, legend, probabilities, confidence
 
+#![forbid(unsafe_code)]
+#![warn(missing_docs, missing_debug_implementations)]
+
 pub mod client;
 pub mod error;
 pub mod questions;
