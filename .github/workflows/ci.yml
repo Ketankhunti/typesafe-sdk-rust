@@ -46,18 +46,15 @@ jobs:
         run: cargo test --all
 
   msrv:
-    name: MSRV (1.75)
+    name: MSRV (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.75
+      - name: Install Rust 1.85
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.75"
-
-      - name: Regenerate lock file for 1.75
-        run: cargo generate-lockfile
+          toolchain: "1.85"
 
       - name: Run tests
         run: cargo test --all
