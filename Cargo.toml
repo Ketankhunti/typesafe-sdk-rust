@@ -1,0 +1,27 @@
+[package]
+name = "typesafe-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+description = "Rust SDK for TypeSafe AI — typed judgments from System One models like Jev"
+homepage = "https://typesafe.ai"
+repository = "https://github.com/Ketankhunti/typesafe-sdk-rust"
+authors = ["Ketan Khunti <khuntiketan50@gmail.com>"]
+keywords = ["ai", "typesafe", "jev", "system-one", "classification"]
+categories = ["api-bindings", "web-programming::http-client"]
+exclude = [
+    "target/",
+    ".github/",
+    "examples/",
+]
+
+[dependencies]
+reqwest = { version = "=0.12", features = ["json", "rustls-tls"], default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

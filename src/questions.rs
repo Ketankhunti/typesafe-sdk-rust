@@ -1,0 +1,343 @@
+//! Question types for the TypeSafe SDK.
+//!
+//! Three primitives, matching the Python and JavaScript SDKs:
+//!
+//! - [`Noul`] — a yes/no question returning a probability in `[0, 1]`.
+//! - [`Choice`] — a multiple-choice question returning a label, probabilities,
+//!   and a confidence score.
+//! - [`Score`] — a rubric-based question returning a numeric score, a legend,
+//!   probabilities, and a confidence score.
+//!
+//! Each type serializes to the wire format expected by `POST /v1/systemone`:
+//! a JSON object with a `"type"` discriminator and `"instructions"` /
+//! `"criteria"` fields.
+
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+// ---------------------------------------------------------------------------
+// Description type
+// ---------------------------------------------------------------------------
+
+/// A criterion description. Can be a string, a JSON object/array, or `null`
+/// (meaning "undescribed"). Mirrors the JS SDK's `EntryType` / `Description`.
+pub type Description = Option<Value>;
+
+// ---------------------------------------------------------------------------
+// Noul
+// ---------------------------------------------------------------------------
+
+/// Optional descriptions for the `true` and `false` outcomes of a [`Noul`]
+/// question.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NoulCriteria {
+    /// Description of the "yes" outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#true: Description,
+    /// Description of the "no" outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#false: Description,
+}
+
+/// A yes/no question. Returns a probability in `[0, 1]`.
+///
+/// Wire format: `{"type":"noul","instructions":"...","criteria":{"true":...,"false":...}}`
+///
+/// The `"type"` tag is added by the [`Question`] enum's `#[serde(tag = "type")]`
+/// attribute; this struct only carries `instructions` and `criteria`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Noul {
+    /// The question as text, a JSON object, or an array. May be `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Description,
+    /// Optional descriptions of the yes and no outcomes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub criteria: Option<NoulCriteria>,
+}
+
+impl Noul {
+    /// Create a new noul question with the given instructions.
+    ///
+    /// `instructions` can be a string, `null`, or any JSON value.
+    /// Pass `None` to omit instructions entirely (the API defaults to `null`).
+    pub fn new(instructions: impl Into<Value>) -> Self {
+        Self {
+            instructions: Some(instructions.into()),
+            criteria: None,
+        }
+    }
+
+    /// Attach criteria describing the yes/no outcomes.
+    #[must_use = "the returned Noul should be used"]
+    pub fn with_criteria(mut self, criteria: NoulCriteria) -> Self {
+        self.criteria = Some(criteria);
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Choice
+// ---------------------------------------------------------------------------
+
+/// A multiple-choice question. Returns a selected label, per-label
+/// probabilities, and a confidence score.
+///
+/// Wire format:
+/// `{"type":"choice","instructions":"...","criteria":{"label":"desc",...}}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Choice {
+    /// The question as text, a JSON object, or an array. May be `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Description,
+    /// Labels mapped to descriptions. `null` means "undescribed".
+    pub criteria: HashMap<String, Description>,
+}
+
+impl Choice {
+    /// Create a new choice question with the given instructions and criteria.
+    ///
+    /// `criteria` is a map of label → description (or `None` for undescribed).
+    pub fn new(instructions: impl Into<Value>, criteria: HashMap<String, Description>) -> Self {
+        Self {
+            instructions: Some(instructions.into()),
+            criteria,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Score
+// ---------------------------------------------------------------------------
+
+/// A rubric-based question. Returns a numeric score, a legend mapping scores
+/// to descriptions, per-score probabilities, and a confidence score.
+///
+/// Wire format:
+/// `{"type":"score","instructions":"...","criteria":["desc0","desc1",...]}`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Score {
+    /// The question as text, a JSON object, or an array. May be `null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Description,
+    /// Ordered list of descriptions indexed by score from zero. At least two
+    /// entries are required. Entries may be `null` (undescribed).
+    pub criteria: Vec<Description>,
+}
+
+impl Score {
+    /// Create a new score question with the given instructions and criteria.
+    ///
+    /// `criteria` must have at least two entries.
+    pub fn new(instructions: impl Into<Value>, criteria: Vec<Description>) -> Self {
+        Self {
+            instructions: Some(instructions.into()),
+            criteria,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Question enum
+// ---------------------------------------------------------------------------
+
+/// A question of any type, identified by its `type` field.
+///
+/// This enum is used as the value type in the `questions` map sent to the API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Question {
+    #[serde(rename = "noul")]
+    Noul(Noul),
+    #[serde(rename = "choice")]
+    Choice(Choice),
+    #[serde(rename = "score")]
+    Score(Score),
+}
+
+impl From<Noul> for Question {
+    fn from(q: Noul) -> Self {
+        Question::Noul(q)
+    }
+}
+
+impl From<Choice> for Question {
+    fn from(q: Choice) -> Self {
+        Question::Choice(q)
+    }
+}
+
+impl From<Score> for Question {
+    fn from(q: Score) -> Self {
+        Question::Score(q)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Builder functions (mirrors the JS SDK's `noul()`, `choice()`, `score()`)
+// ---------------------------------------------------------------------------
+
+/// Build a yes/no question. `instructions` defaults to `null` when omitted.
+///
+/// # Examples
+/// ```
+/// use typesafe_sdk::noul;
+///
+/// let q = noul("Is this about billing?");
+/// let q = noul(serde_json::Value::Null); // no instructions
+/// ```
+pub fn noul(instructions: impl Into<Value>) -> Noul {
+    Noul::new(instructions)
+}
+
+/// Build a multiple-choice question.
+///
+/// # Examples
+/// ```
+/// use typesafe_sdk::choice;
+/// use std::collections::HashMap;
+///
+/// let mut criteria = HashMap::new();
+/// criteria.insert("calm".to_string(), None);
+/// criteria.insert("angry".to_string(), None);
+/// let q = choice("What is the tone?", criteria);
+/// ```
+pub fn choice(instructions: impl Into<Value>, criteria: HashMap<String, Description>) -> Choice {
+    Choice::new(instructions, criteria)
+}
+
+/// Build a rubric-based score question. `criteria` must have at least two
+/// entries.
+///
+/// # Examples
+/// ```
+/// use typesafe_sdk::score;
+///
+/// let q = score("How urgent?", vec![None, Some("high".into())]);
+/// ```
+pub fn score(instructions: impl Into<Value>, criteria: Vec<Description>) -> Score {
+    Score::new(instructions, criteria)
+}
+
+// ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+/// Validate a set of questions before sending.
+///
+/// Mirrors the JS SDK's `validateQuestions`:
+/// - Questions must not be empty.
+/// - Score criteria must be an array with at least two entries.
+pub(crate) fn validate_questions(
+    questions: &HashMap<String, Question>,
+) -> crate::error::Result<()> {
+    if questions.is_empty() {
+        return Err(crate::error::TypeSafeError::Validation(
+            "At least one question is required.".to_string(),
+        ));
+    }
+
+    for (name, question) in questions {
+        if let Question::Score(score) = question {
+            if score.criteria.len() < 2 {
+                return Err(crate::error::TypeSafeError::Validation(format!(
+                    "Score question \"{}\" has {} criteria; at least two scores are required.",
+                    name,
+                    score.criteria.len()
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn noul_serializes_correctly() {
+        let q: Question = noul("Is this about billing?").into();
+        let json = serde_json::to_value(&q).unwrap();
+        assert_eq!(json["type"], "noul");
+        assert_eq!(json["instructions"], "Is this about billing?");
+        assert!(json.get("criteria").is_none());
+    }
+
+    #[test]
+    fn noul_with_criteria_serializes_correctly() {
+        let q = noul("?").with_criteria(NoulCriteria {
+            r#true: Some("yes means this".into()),
+            r#false: None,
+        });
+        let json = serde_json::to_value(&q).unwrap();
+        assert_eq!(json["criteria"]["true"], "yes means this");
+        assert!(json["criteria"].get("false").is_none());
+    }
+
+    #[test]
+    fn choice_serializes_correctly() {
+        let mut criteria = HashMap::new();
+        criteria.insert("calm".to_string(), None);
+        criteria.insert("angry".to_string(), Some("very upset".into()));
+        let q: Question = choice("Tone?", criteria).into();
+        let json = serde_json::to_value(&q).unwrap();
+        assert_eq!(json["type"], "choice");
+        assert_eq!(json["instructions"], "Tone?");
+        assert_eq!(json["criteria"]["calm"], serde_json::Value::Null);
+        assert_eq!(json["criteria"]["angry"], "very upset");
+    }
+
+    #[test]
+    fn score_serializes_correctly() {
+        let q: Question = score("Urgency?", vec![Some("low".into()), Some("high".into())]).into();
+        let json = serde_json::to_value(&q).unwrap();
+        assert_eq!(json["type"], "score");
+        assert_eq!(json["instructions"], "Urgency?");
+        assert_eq!(json["criteria"][0], "low");
+        assert_eq!(json["criteria"][1], "high");
+    }
+
+    #[test]
+    fn question_enum_serializes_with_type_tag() {
+        let q: Question = noul("?").into();
+        let json = serde_json::to_value(&q).unwrap();
+        assert_eq!(json["type"], "noul");
+    }
+
+    #[test]
+    fn validate_rejects_empty_questions() {
+        let questions = HashMap::new();
+        let result = validate_questions(&questions);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("At least one question is required"));
+    }
+
+    #[test]
+    fn validate_rejects_score_with_fewer_than_two_criteria() {
+        let mut questions = HashMap::new();
+        questions.insert(
+            "q".to_string(),
+            Question::Score(score("?", vec![Some("only".into())])),
+        );
+        let result = validate_questions(&questions);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("at least two"));
+    }
+
+    #[test]
+    fn validate_accepts_valid_questions() {
+        let mut questions = HashMap::new();
+        questions.insert("q".to_string(), Question::Noul(noul("?")));
+        questions.insert(
+            "s".to_string(),
+            Question::Score(score("?", vec![Some("low".into()), Some("high".into())])),
+        );
+        assert!(validate_questions(&questions).is_ok());
+    }
+}
