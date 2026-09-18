@@ -2,7 +2,7 @@
 name = "typesafe-sdk"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 description = "Rust SDK for TypeSafe AI — typed judgments from System One models like Jev"
 homepage = "https://typesafe.ai"

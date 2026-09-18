@@ -19,7 +19,7 @@ branch on, rank with, or feed into downstream logic.
 typesafe-sdk = "0.1"
 ```
 
-> Requires Rust 1.85+ and uses `rustls-tls` (no OpenSSL dependency).
+> Requires Rust 1.88+ and uses `rustls-tls` (no OpenSSL dependency).
 
 ## Quickstart
 
