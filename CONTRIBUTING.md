@@ -1,4 +1,4 @@
-# Contributing to typesafe-ai-sdk
+# Contributing to typesafeai-sdk
 
 Thank you for your interest in contributing! This SDK aims to be a clean,
 idiomatic Rust client for the [TypeSafe AI](https://typesafe.ai) API.

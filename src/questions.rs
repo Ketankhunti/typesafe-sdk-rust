@@ -186,7 +186,7 @@ impl From<Score> for Question {
 ///
 /// # Examples
 /// ```
-/// use typesafe_ai_sdk::noul;
+/// use typesafeai_sdk::noul;
 ///
 /// let q = noul("Is this about billing?");
 /// let q = noul(serde_json::Value::Null); // no instructions
@@ -199,7 +199,7 @@ pub fn noul(instructions: impl Into<Value>) -> Noul {
 ///
 /// # Examples
 /// ```
-/// use typesafe_ai_sdk::choice;
+/// use typesafeai_sdk::choice;
 /// use std::collections::HashMap;
 ///
 /// let mut criteria = HashMap::new();
@@ -216,7 +216,7 @@ pub fn choice(instructions: impl Into<Value>, criteria: HashMap<String, Descript
 ///
 /// # Examples
 /// ```
-/// use typesafe_ai_sdk::score;
+/// use typesafeai_sdk::score;
 ///
 /// let q = score("How urgent?", vec![None, Some("high".into())]);
 /// ```
