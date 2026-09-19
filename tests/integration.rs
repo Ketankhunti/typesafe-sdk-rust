@@ -1174,9 +1174,9 @@ fn extra_headers_are_sent_in_request() {
 }
 
 #[test]
-fn extra_headers_protected_headers_are_not_overridden() {
+fn extra_headers_protected_headers_are_rejected() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let (addr, captured) = capture_request_and_reply(
+    let (addr, _captured) = capture_request_and_reply(
         listener,
         http_response(
             200,
@@ -1193,33 +1193,26 @@ fn extra_headers_protected_headers_are_not_overridden() {
         .with_retry(RetryPolicy::new(0));
     let client = TypeSafeClient::from_config(config).unwrap();
 
-    // Try to override protected headers — they should be silently ignored.
+    // Try to override protected headers — they should be rejected with an
+    // error, not silently ignored.
     let opts = typesafeai_sdk::SystemOneOpts::new()
         .with_extra_header("Authorization", "Bearer evil-token")
         .with_extra_header("Accept", "text/html")
         .with_extra_header("x-typesafe-sdk", "fake-sdk/0.0.0");
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let _ = rt
-        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
-        .unwrap();
+    let result = rt.block_on(async {
+        client.system_one_with_opts(billing_question(), opts).await
+    });
 
-    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-    let lower = request.to_ascii_lowercase();
-    // The original auth header should be preserved.
     assert!(
-        lower.contains("authorization: bearer test_key"),
-        "auth header was overridden:\n{request}"
+        result.is_err(),
+        "expected protected headers to be rejected, but the call succeeded"
     );
-    // Accept should remain application/json.
+    let err = result.unwrap_err();
     assert!(
-        lower.contains("accept: application/json"),
-        "accept header was overridden:\n{request}"
-    );
-    // SDK header should remain the real version.
-    assert!(
-        !lower.contains("fake-sdk"),
-        "sdk header was overridden:\n{request}"
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("protected")),
+        "expected Validation error about protected header, got: {err:?}"
     );
 }
 
@@ -1395,6 +1388,16 @@ fn custom_http_client_is_used() {
         lower.contains("user-agent: my-custom-agent/1.0"),
         "custom user-agent not found in request:\n{request}"
     );
+    // Bug #1 regression: auth header must be present even with a custom client.
+    assert!(
+        lower.contains("authorization: bearer test_key"),
+        "auth header missing from custom-client request:\n{request}"
+    );
+    // Accept header must also be present.
+    assert!(
+        lower.contains("accept: application/json"),
+        "accept header missing from custom-client request:\n{request}"
+    );
 }
 
 // ===========================================================================
@@ -1436,4 +1439,164 @@ fn extra_body_overrides_state_field() {
     let body: serde_json::Value = serde_json::from_str(&request[body_start..]).unwrap();
     // The extra_body value should override the known field.
     assert_eq!(body["state"], "overridden state");
+}
+
+// ===========================================================================
+// Bug #2: extra_body cannot bypass validation
+// ===========================================================================
+
+#[test]
+fn extra_body_cannot_empty_questions() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Override questions with an empty object via extra_body — should be
+    // rejected by re-validation, not silently accepted.
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_extra_body(serde_json::json!({"questions": {}}));
+
+    let result = rt.block_on(async {
+        client.system_one_with_opts(billing_question(), opts).await
+    });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("question")),
+        "expected Validation error about questions, got: {err:?}"
+    );
+}
+
+#[test]
+fn extra_body_cannot_empty_model() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Override model with an empty string via extra_body — should be
+    // rejected by re-validation.
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_extra_body(serde_json::json!({"model": ""}));
+
+    let result = rt.block_on(async {
+        client.system_one_with_opts(billing_question(), opts).await
+    });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("Model")),
+        "expected Validation error about model, got: {err:?}"
+    );
+}
+
+#[test]
+fn extra_body_rejects_non_object() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // A non-object extra_body (array) should be rejected.
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_extra_body(serde_json::json!([1, 2, 3]));
+
+    let result = rt.block_on(async {
+        client.system_one_with_opts(billing_question(), opts).await
+    });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("extra_body")),
+        "expected Validation error about extra_body, got: {err:?}"
+    );
+}
+
+// ===========================================================================
+// Bug #5: response body size cap
+// ===========================================================================
+
+#[test]
+fn response_body_exceeding_cap_returns_error() {
+    // Build a response body larger than 1 MiB.
+    let large_body = "x".repeat(1024 * 1024 + 100);
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: text/plain\r\n",
+        &large_body,
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async { client.list_models().await });
+
+    let err = result.unwrap_err();
+    // Should be a transport error (body too large), not a successful parse.
+    assert!(
+        matches!(err.kind(), ErrorKind::Transport(msg) if msg.contains("maximum size")),
+        "expected Transport error about body size, got: {err:?}"
+    );
+}
+
+// ===========================================================================
+// Bug #6: no redirects
+// ===========================================================================
+
+#[test]
+fn does_not_follow_redirects() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
+    let redirect_target = format!("http://{addr}/evil");
+    let redirect_response = format!(
+        "HTTP/1.1 307 Temporary Redirect\r\n\
+         Location: {redirect_target}\r\n\
+         Content-Length: 0\r\n\
+         \r\n"
+    );
+
+    let (addr, _captured) = capture_request_and_reply(
+        listener,
+        redirect_response,
+    );
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async { client.list_models().await });
+
+    // The client should NOT follow the redirect. A 307 with no body
+    // should result in an error (either a parse error or an API error
+    // for the unexpected status), but NOT a successful response from
+    // the redirect target.
+    assert!(
+        result.is_err(),
+        "expected error for 307 redirect (should not be followed), but got success"
+    );
 }

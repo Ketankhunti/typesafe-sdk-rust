@@ -79,9 +79,17 @@ pub enum ErrorKind {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// An HTTP transport error from the underlying client.
+    /// An HTTP transport error from the underlying client (e.g. a body-read
+    /// failure, redirect loop, or request-builder error). The underlying
+    /// `reqwest::Error` is converted to a string so it does not leak into
+    /// the public API.
     #[error("transport error: {0}")]
-    Transport(#[from] reqwest::Error),
+    Transport(String),
+
+    /// A Tokio runtime error from the blocking client (e.g. attempting to
+    /// create or use a blocking client from inside an async context).
+    #[error("runtime error: {0}")]
+    Runtime(String),
 }
 
 impl ErrorKind {
@@ -167,7 +175,7 @@ impl From<serde_json::Error> for TypeSafeError {
 
 impl From<reqwest::Error> for TypeSafeError {
     fn from(e: reqwest::Error) -> Self {
-        Self::new(ErrorKind::Transport(e))
+        Self::new(ErrorKind::Transport(e.to_string()))
     }
 }
 

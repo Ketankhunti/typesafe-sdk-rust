@@ -16,7 +16,7 @@ branch on, rank with, or feed into downstream logic.
 
 ```toml
 [dependencies]
-typesafeai-sdk = "0.1"
+typesafeai-sdk = "0.3"
 ```
 
 > Requires Rust 1.88+ and uses `rustls-tls` (no OpenSSL dependency).
@@ -132,16 +132,25 @@ let client = TypeSafeClient::from_env()?;
 // Or explicit
 let client = TypeSafeClient::new("apikey_...")?;
 
-// Or full control
-let config = ClientConfig {
-    api_key: "apikey_...".to_string(),
-    base_url: "https://api.typesafe.ai".to_string(),
-    default_model: "jev-latest".to_string(),
-    timeout: Duration::from_secs(30),
-    retry: RetryPolicy::new(3)
-        .with_base_delay(Duration::from_millis(500))
-        .with_max_delay(Duration::from_secs(10)),
-};
+// Or full control via the builder (ClientConfig is #[non_exhaustive],
+// so use ClientConfig::new() and the .with_*() methods):
+let config = ClientConfig::new("apikey_...")
+    .with_base_url("https://api.typesafe.ai")
+    .with_default_model("jev-latest")
+    .with_timeout(Duration::from_secs(30))
+    .with_retry(
+        RetryPolicy::new(3)
+            .with_base_delay(Duration::from_millis(500))
+            .with_max_delay(Duration::from_secs(10)),
+    );
+let client = TypeSafeClient::from_config(config)?;
+
+// You can also supply a custom reqwest::Client (e.g. to share a connection
+// pool or apply custom TLS settings):
+let custom_http = reqwest::Client::builder()
+    .timeout(Duration::from_secs(30))
+    .build()?;
+let config = ClientConfig::new("apikey_...").with_http_client(custom_http);
 let client = TypeSafeClient::from_config(config)?;
 # Ok(())
 # }
@@ -161,14 +170,16 @@ All SDK operations return `Result<T, TypeSafeError>`. Errors map to typed
 variants:
 
 ```rust
-use typesafeai_sdk::TypeSafeError;
+use typesafeai_sdk::{TypeSafeError, ErrorKind};
 
 match client.system_one(state, questions).await {
     Ok(response) => { /* ... */ }
-    Err(TypeSafeError::Authentication(msg)) => { /* invalid API key */ }
-    Err(TypeSafeError::RateLimit(msg)) => { /* rate limited (after retries) */ }
-    Err(TypeSafeError::Validation(msg)) => { /* invalid questions */ }
-    Err(e) => eprintln!("error: {e}"),
+    Err(e) => match e.kind() {
+        ErrorKind::Authentication(msg) => { /* invalid API key */ }
+        ErrorKind::RateLimit(msg) => { /* rate limited (after retries) */ }
+        ErrorKind::Validation(msg) => { /* invalid questions */ }
+        _ => eprintln!("error: {e}"),
+    },
 }
 ```
 

@@ -29,12 +29,6 @@ pub struct SystemOneRequest {
     pub model: String,
     /// Non-empty map of question names to question objects.
     pub questions: HashMap<String, Question>,
-    /// Extra fields to merge into the request body for forward compatibility.
-    /// These are serialized at the top level alongside `state`, `model`,
-    /// and `questions`. If a key collides with a known field, the known
-    /// field takes precedence.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extra_body: Option<Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -277,51 +271,39 @@ impl ListModelsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// SetRequestId trait
+// SetMetadata trait (internal)
 // ---------------------------------------------------------------------------
 
-/// Trait for response types that can carry a request ID captured from the
-/// `x-typesafe-request-id` response header.
+/// Internal trait for response types that can carry a request ID (from the
+/// `x-typesafe-request-id` header) and the raw JSON body.
 ///
 /// Implemented by [`SystemOneResponse`] and [`ListModelsResponse`]. The
-/// client calls [`set_request_id`](Self::set_request_id) after deserializing
-/// the response body, injecting the header value so callers can correlate
-/// requests with server-side logs.
-pub trait SetRequestId {
-    /// Set the request ID on this response.
-    fn set_request_id(&mut self, request_id: Option<String>);
-}
-
-/// Trait for response types that can carry the raw JSON body.
+/// client calls [`set_metadata`](Self::set_metadata) after deserializing
+/// the response body.
 ///
-/// Implemented by [`SystemOneResponse`] and [`ListModelsResponse`]. The
-/// client calls [`set_raw`](Self::set_raw) after deserializing, injecting
-/// the raw JSON so callers can access fields the SDK doesn't yet model.
-pub trait SetRawBody {
-    /// Set the raw JSON body on this response.
-    fn set_raw(&mut self, raw: Option<Value>);
+/// This trait is not exported: it is an implementation detail of the client's
+/// generic `parse_response` method.
+pub(crate) trait SetMetadata {
+    /// Set the request ID and raw body on this response. `request_id` is
+    /// `Some` only when the header was present, so a `None` value does not
+    /// overwrite an ID that may have been in the body.
+    fn set_metadata(&mut self, request_id: Option<String>, raw: Option<Value>);
 }
 
-impl SetRequestId for SystemOneResponse {
-    fn set_request_id(&mut self, request_id: Option<String>) {
-        self.request_id = request_id;
-    }
-}
-
-impl SetRawBody for SystemOneResponse {
-    fn set_raw(&mut self, raw: Option<Value>) {
+impl SetMetadata for SystemOneResponse {
+    fn set_metadata(&mut self, request_id: Option<String>, raw: Option<Value>) {
+        if let Some(id) = request_id {
+            self.request_id = Some(id);
+        }
         self.raw = raw;
     }
 }
 
-impl SetRequestId for ListModelsResponse {
-    fn set_request_id(&mut self, request_id: Option<String>) {
-        self.request_id = request_id;
-    }
-}
-
-impl SetRawBody for ListModelsResponse {
-    fn set_raw(&mut self, raw: Option<Value>) {
+impl SetMetadata for ListModelsResponse {
+    fn set_metadata(&mut self, request_id: Option<String>, raw: Option<Value>) {
+        if let Some(id) = request_id {
+            self.request_id = Some(id);
+        }
         self.raw = raw;
     }
 }

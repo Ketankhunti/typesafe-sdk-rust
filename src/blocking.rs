@@ -47,8 +47,11 @@ use crate::types::{ListModelsResponse, SystemOneResponse};
 ///
 /// # Panics
 ///
-/// Panics if the internal Tokio runtime cannot be created (extremely unlikely
-/// and typically indicates a system resource exhaustion).
+/// This client never panics. If the internal Tokio runtime cannot be created
+/// (extremely unlikely, typically system resource exhaustion), an
+/// [`ErrorKind::Runtime`] error is returned instead. If you attempt to
+/// construct a `BlockingClient` from inside an async context, an
+/// [`ErrorKind::Runtime`] error is returned rather than panicking.
 #[non_exhaustive]
 pub struct BlockingClient {
     inner: TypeSafeClient,
@@ -81,14 +84,27 @@ impl BlockingClient {
     /// # Errors
     /// - [`TypeSafeError::Validation`] if the API key is empty, the base URL
     ///   is invalid, or the default model name is empty.
+    /// - [`TypeSafeError::Runtime`] if called from inside an async context or
+    ///   if the Tokio runtime cannot be created.
     #[must_use = "the returned client should be used to make API calls"]
     pub fn from_config(config: ClientConfig) -> Result<Self> {
+        // Guard: creating a new runtime inside an existing async context
+        // would panic. Return a typed error instead.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(TypeSafeError::new(ErrorKind::Runtime(
+                "Cannot create a BlockingClient from inside an async context. \
+                 Use TypeSafeClient instead, or construct the BlockingClient \
+                 before entering the async runtime."
+                    .to_string(),
+            )));
+        }
+
         let inner = TypeSafeClient::from_config(config)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| {
-                TypeSafeError::new(ErrorKind::Validation(format!(
+                TypeSafeError::new(ErrorKind::Runtime(format!(
                     "Failed to create Tokio runtime for blocking client: {e}"
                 )))
             })?;
@@ -101,14 +117,27 @@ impl BlockingClient {
     ///
     /// # Errors
     /// - [`TypeSafeError::Validation`] if `TYPESAFE_API_KEY` is unset or empty.
+    /// - [`TypeSafeError::Runtime`] if called from inside an async context or
+    ///   if the Tokio runtime cannot be created.
     #[must_use = "the returned client should be used to make API calls"]
     pub fn from_env() -> Result<Self> {
+        // Guard: creating a new runtime inside an existing async context
+        // would panic. Return a typed error instead.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(TypeSafeError::new(ErrorKind::Runtime(
+                "Cannot create a BlockingClient from inside an async context. \
+                 Use TypeSafeClient instead, or construct the BlockingClient \
+                 before entering the async runtime."
+                    .to_string(),
+            )));
+        }
+
         let inner = TypeSafeClient::from_env()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| {
-                TypeSafeError::new(ErrorKind::Validation(format!(
+                TypeSafeError::new(ErrorKind::Runtime(format!(
                     "Failed to create Tokio runtime for blocking client: {e}"
                 )))
             })?;

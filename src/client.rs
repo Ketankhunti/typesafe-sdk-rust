@@ -38,15 +38,40 @@ use std::fmt;
 use std::time::Duration;
 
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, RETRY_AFTER};
-use reqwest::{Client as HttpClient, Method, StatusCode};
+use reqwest::{redirect, Client as HttpClient, Method, StatusCode};
 use serde_json::Value;
 
 use crate::error::{ErrorKind, Result, TypeSafeError};
 use crate::questions::{validate_questions, Question};
 use crate::retry::{jitter_seed, RetryPolicy};
 use crate::types::{
-    ListModelsResponse, SetRawBody, SetRequestId, SystemOneRequest, SystemOneResponse,
+    ListModelsResponse, SetMetadata, SystemOneRequest, SystemOneResponse,
 };
+
+/// Maximum response body size to read into memory (1 MiB). Protects against
+/// a malicious or buggy server returning an enormous body that would exhaust
+/// memory.
+const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
+
+/// Header names that callers may not set via `with_extra_header`. These are
+/// either set by the SDK itself (auth, accept, SDK ID) or are hop-by-hop /
+/// content headers that must not be tampered with.
+const PROTECTED_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "accept",
+    "x-typesafe-sdk",
+    "content-type",
+    "content-length",
+    "transfer-encoding",
+    "host",
+    "connection",
+    "cookie",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "te",
+    "trailer",
+    "upgrade",
+];
 
 const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-latest";
@@ -183,6 +208,10 @@ impl fmt::Debug for ClientConfig {
 pub struct TypeSafeClient {
     config: ClientConfig,
     http: HttpClient,
+    /// The pre-built `Authorization: Bearer <key>` header value, stored so it
+    /// can be attached per-request even when the caller supplies a custom
+    /// `reqwest::Client` (whose default headers we cannot modify).
+    auth_header: HeaderValue,
 }
 
 impl fmt::Debug for TypeSafeClient {
@@ -246,7 +275,7 @@ impl CallOpts {
 ///     .with_timeout(Duration::from_secs(30))
 ///     .with_extra_header("X-Trace-Id", "abc123");
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct SystemOneOpts {
     /// Override the client's default model for this call.
@@ -263,6 +292,28 @@ pub struct SystemOneOpts {
     pub(crate) timeout: Option<Duration>,
     /// Per-call retry policy override. `None` uses the client default.
     pub(crate) retry: Option<RetryPolicy>,
+}
+
+impl fmt::Debug for SystemOneOpts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SystemOneOpts")
+            .field("model", &self.model)
+            // Redact state — it may contain sensitive user data.
+            .field("state", &self.state.as_ref().map(|_| "<redacted>"))
+            .field("extra_body", &self.extra_body)
+            // Redact header values — they may contain tokens.
+            .field(
+                "extra_headers",
+                &self
+                    .extra_headers
+                    .iter()
+                    .map(|(k, _)| (k.as_str(), "<redacted>"))
+                    .collect::<Vec<_>>(),
+            )
+            .field("timeout", &self.timeout)
+            .field("retry", &self.retry)
+            .finish()
+    }
 }
 
 impl SystemOneOpts {
@@ -371,7 +422,7 @@ impl TypeSafeClient {
         auth.set_sensitive(true);
 
         let mut headers = HeaderMap::new();
-        headers.insert(AUTHORIZATION, auth);
+        headers.insert(AUTHORIZATION, auth.clone());
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(
             HeaderName::from_static("x-typesafe-sdk"),
@@ -380,18 +431,27 @@ impl TypeSafeClient {
 
         // Use the caller-provided HTTP client if given; otherwise build one
         // from the config. A provided client is used as-is so the caller
-        // controls TLS, proxies, connection pools, etc.
+        // controls TLS, proxies, connection pools, etc. Auth and SDK headers
+        // are attached per-request in `attempt_request` so they work with both
+        // paths.
         let http = match config.http_client.take() {
             Some(client) => client,
             None => HttpClient::builder()
                 .timeout(config.timeout)
                 .user_agent(SDK_USER_AGENT)
                 .default_headers(headers)
+                // Never follow redirects: a 307/308 would replay the POST body
+                // (and the Authorization header) to a potentially different host.
+                .redirect(redirect::Policy::none())
                 .build()
-                .map_err(|e| TypeSafeError::new(ErrorKind::Transport(e)))?,
+                .map_err(|e| TypeSafeError::new(ErrorKind::Transport(e.to_string())))?,
         };
 
-        Ok(Self { config, http })
+        Ok(Self {
+            config,
+            http,
+            auth_header: auth,
+        })
     }
 
     /// Create a new client, reading the API key from the `TYPESAFE_API_KEY`
@@ -536,7 +596,6 @@ impl TypeSafeClient {
             state: opts.state.unwrap_or(Value::Null),
             model: model_name,
             questions,
-            extra_body: None, // merged below as last-write-wins
         };
 
         let mut body = serde_json::to_value(&request)?;
@@ -545,9 +604,41 @@ impl TypeSafeClient {
         // Last-write-wins: extra_body keys override known fields (state, model,
         // questions). Object values are replaced rather than deep-merged.
         if let Some(extra) = &opts.extra_body {
-            if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
-                for (k, v) in extra_obj {
-                    obj.insert(k.clone(), v.clone());
+            let extra_obj = extra.as_object().ok_or_else(|| {
+                TypeSafeError::new(ErrorKind::Validation(
+                    "extra_body must be a JSON object.".to_string(),
+                ))
+            })?;
+            let body_obj = body.as_object_mut().ok_or_else(|| {
+                TypeSafeError::new(ErrorKind::Validation(
+                    "Internal error: request body is not a JSON object.".to_string(),
+                ))
+            })?;
+            for (k, v) in extra_obj {
+                body_obj.insert(k.clone(), v.clone());
+            }
+        }
+
+        // Re-validate fields that extra_body may have overridden, so a
+        // last-write-wins override cannot bypass the checks above.
+        if let Some(obj) = body.as_object() {
+            if let Some(m) = obj.get("model").and_then(|v| v.as_str()) {
+                if m.trim().is_empty() {
+                    return Err(TypeSafeError::new(ErrorKind::Validation(
+                        "Model name cannot be empty.".to_string(),
+                    )));
+                }
+            }
+            if let Some(q) = obj.get("questions") {
+                let empty = match q {
+                    Value::Object(map) => map.is_empty(),
+                    Value::Null => true,
+                    _ => false,
+                };
+                if empty {
+                    return Err(TypeSafeError::new(ErrorKind::Validation(
+                        "At least one question is required.".to_string(),
+                    )));
                 }
             }
         }
@@ -576,7 +667,7 @@ impl TypeSafeClient {
     // Internal HTTP + retry
     // -----------------------------------------------------------------------
 
-    async fn request_with_retry_opts<T: serde::de::DeserializeOwned + 'static>(
+    async fn request_with_retry_opts<T: serde::de::DeserializeOwned + SetMetadata>(
         &self,
         method: Method,
         path: &str,
@@ -618,12 +709,20 @@ impl TypeSafeClient {
 
                     tokio::time::sleep(delay).await;
                     attempt += 1;
+
+                    // Post-attempt hard cap: if the elapsed time (including
+                    // the attempt and the sleep) already exceeds the budget,
+                    // don't start another attempt that would push further past
+                    // it.
+                    if retry.budget_exceeded(started.elapsed(), Duration::ZERO) {
+                        return Err(failure.error);
+                    }
                 }
             }
         }
     }
 
-    async fn attempt_request<T: serde::de::DeserializeOwned + 'static>(
+    async fn attempt_request<T: serde::de::DeserializeOwned + SetMetadata>(
         &self,
         method: &Method,
         url: &str,
@@ -631,27 +730,44 @@ impl TypeSafeClient {
         opts: &CallOpts,
         timeout: Duration,
     ) -> std::result::Result<T, Failure> {
-        // Auth, Accept, User-Agent and X-TypeSafe-SDK are default headers set
-        // once in `from_config`; `.json()` sets Content-Type.
-        let mut request = self.http.request(method.clone(), url).timeout(timeout);
+        // Attach auth, Accept, and SDK headers per-request so they are present
+        // even when the caller supplies a custom `reqwest::Client` whose
+        // default headers we cannot modify.
+        let mut request = self
+            .http
+            .request(method.clone(), url)
+            .timeout(timeout)
+            .header(AUTHORIZATION, &self.auth_header)
+            .header(ACCEPT, "application/json")
+            .header("x-typesafe-sdk", SDK_USER_AGENT);
+
         if let Some(b) = body {
             request = request.json(b);
         }
 
-        // Apply per-call extra headers. Protected headers (Authorization,
-        // Accept, x-typesafe-sdk) are silently skipped to prevent accidental
-        // credential leakage or SDK identification removal.
+        // Apply per-call extra headers. Protected headers are rejected with an
+        // error to prevent accidental credential leakage, SDK identification
+        // removal, or content/header corruption.
         for (name, value) in &opts.extra_headers {
             let lower = name.to_ascii_lowercase();
-            if lower == "authorization" || lower == "accept" || lower == "x-typesafe-sdk" {
-                continue;
+            if PROTECTED_HEADER_NAMES.contains(&lower.as_str()) {
+                return Err(Failure::from(TypeSafeError::new(ErrorKind::Validation(
+                    format!(
+                        "Header `{name}` is protected and cannot be set via with_extra_header."
+                    ),
+                ))));
             }
-            if let (Ok(hn), Ok(hv)) = (
-                HeaderName::try_from(name.as_str()),
-                HeaderValue::try_from(value.as_str()),
-            ) {
-                request = request.header(hn, hv);
-            }
+            let hn = HeaderName::try_from(name.as_str()).map_err(|_| {
+                Failure::from(TypeSafeError::new(ErrorKind::Validation(format!(
+                    "Invalid header name: {name}"
+                ))))
+            })?;
+            let hv = HeaderValue::try_from(value.as_str()).map_err(|_| {
+                Failure::from(TypeSafeError::new(ErrorKind::Validation(format!(
+                    "Invalid header value for `{name}`: contains invalid characters."
+                ))))
+            })?;
+            request = request.header(hn, hv);
         }
 
         let response = request
@@ -662,7 +778,7 @@ impl TypeSafeClient {
         self.parse_response(response).await
     }
 
-    async fn parse_response<T: serde::de::DeserializeOwned + 'static>(
+    async fn parse_response<T: serde::de::DeserializeOwned + SetMetadata>(
         &self,
         response: reqwest::Response,
     ) -> std::result::Result<T, Failure> {
@@ -686,10 +802,16 @@ impl TypeSafeClient {
                     .and_then(parse_retry_after)
             });
 
-        let text = response.text().await.map_err(map_body_error)?;
+        // Read the body with a size cap to protect against unbounded memory
+        // consumption from a malicious or buggy server.
+        let bytes = read_body_capped(response, MAX_RESPONSE_BODY_BYTES).await?;
+        let text = String::from_utf8_lossy(&bytes);
 
         if status.is_success() {
-            let mut result: T = serde_json::from_str(&text).map_err(|e| {
+            // Parse once into a `Value`, then deserialize `T` from it so we
+            // can reuse the same `Value` for the `raw` field without a second
+            // parse.
+            let raw: Value = serde_json::from_str(&text).map_err(|e| {
                 Failure::from(TypeSafeError::new(ErrorKind::ResponseValidation {
                     message: format!(
                         "Failed to parse response body: {e}\nBody: {}",
@@ -698,15 +820,25 @@ impl TypeSafeClient {
                     field_path: None,
                 }))
             })?;
-            // Inject the request ID and raw body into the response type.
-            // This is a no-op for types that don't implement the traits.
-            let raw = serde_json::from_str::<Value>(&text).ok();
-            inject_metadata(&mut result, request_id.clone(), raw);
+            let mut result: T = serde_json::from_value(raw.clone()).map_err(|e| {
+                Failure::from(TypeSafeError::new(ErrorKind::ResponseValidation {
+                    message: format!(
+                        "Failed to parse response body: {e}\nBody: {}",
+                        truncate(&text, MAX_ERROR_BODY_CHARS)
+                    ),
+                    field_path: None,
+                }))
+            })?;
+            // Inject the request ID (only if the header was present) and raw
+            // body into the response type via the trait.
+            result.set_metadata(request_id, Some(raw));
             return Ok(result);
         }
 
         // Map HTTP status codes to typed errors, mirroring the Python/JS SDKs.
+        // Truncate the extracted message to prevent unbounded error strings.
         let message = Self::extract_error_message(&text)
+            .map(|m| truncate(&m, MAX_ERROR_BODY_CHARS))
             .unwrap_or_else(|| truncate(&text, MAX_ERROR_BODY_CHARS));
         let kind = match status {
             StatusCode::UNAUTHORIZED => ErrorKind::Authentication(message),
@@ -758,21 +890,29 @@ impl TypeSafeClient {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Inject the request ID and raw JSON body into a response type if it
-/// implements [`SetRequestId`](crate::types::SetRequestId) and/or
-/// [`SetRawBody`](crate::types::SetRawBody).
-///
-/// Uses runtime type checking via `Any` so the generic `parse_response`
-/// can stay monomorphic without requiring all `T` to implement the traits.
-fn inject_metadata<T: 'static>(value: &mut T, request_id: Option<String>, raw: Option<Value>) {
-    use std::any::Any;
-    if let Some(resp) = (value as &mut dyn Any).downcast_mut::<SystemOneResponse>() {
-        resp.set_request_id(request_id);
-        resp.set_raw(raw);
-    } else if let Some(resp) = (value as &mut dyn Any).downcast_mut::<ListModelsResponse>() {
-        resp.set_request_id(request_id);
-        resp.set_raw(raw);
+/// Read the response body into a `Vec<u8>` with a maximum size cap.
+/// Returns `Err` if the body exceeds `max_bytes`, using a transport error.
+async fn read_body_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> std::result::Result<Vec<u8>, TypeSafeError> {
+    let mut bytes = Vec::new();
+    let mut resp = response;
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if bytes.len() + chunk.len() > max_bytes {
+                    return Err(TypeSafeError::new(ErrorKind::Transport(format!(
+                        "response body exceeds maximum size of {max_bytes} bytes"
+                    ))));
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => return Err(TypeSafeError::new(ErrorKind::Transport(e.to_string()))),
+        }
     }
+    Ok(bytes)
 }
 
 /// Map a `reqwest` error to the appropriate `TypeSafeError` variant.
@@ -797,18 +937,8 @@ fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> TypeSafeError {
     } else if e.is_connect() {
         TypeSafeError::new(ErrorKind::Connection(e.to_string()))
     } else {
-        TypeSafeError::new(ErrorKind::Transport(e))
+        TypeSafeError::new(ErrorKind::Transport(e.to_string()))
     }
-}
-
-/// Map an error that occurred while *reading the response body*.
-///
-/// By the time we're reading the body, the server has already received and
-/// processed the request. Any failure here — timeout, truncated body, or
-/// connection reset — must be non-retryable to avoid replaying a POST whose
-/// side effects the server may have already applied.
-fn map_body_error(e: reqwest::Error) -> TypeSafeError {
-    TypeSafeError::new(ErrorKind::Transport(e))
 }
 
 /// Parse a `Retry-After` header value given in seconds.

@@ -275,3 +275,35 @@ fn blocking_base_url_and_default_model_accessors() {
     assert_eq!(client.base_url(), "http://localhost:9999");
     assert_eq!(client.default_model(), "jev-latest");
 }
+
+#[test]
+fn blocking_from_config_rejects_async_context() {
+    // When called from inside a Tokio runtime, from_config should return
+    // an ErrorKind::Runtime error instead of panicking.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async {
+        BlockingClient::from_config(ClientConfig::new("test_key"))
+    });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Runtime(msg) if msg.contains("async context")),
+        "expected Runtime error about async context, got: {err:?}"
+    );
+}
+
+#[test]
+fn blocking_from_env_rejects_async_context() {
+    // When called from inside a Tokio runtime, from_env should return
+    // an ErrorKind::Runtime error instead of panicking.
+    std::env::set_var("TYPESAFE_API_KEY", "test_key");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async { BlockingClient::from_env() });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Runtime(msg) if msg.contains("async context")),
+        "expected Runtime error about async context, got: {err:?}"
+    );
+    std::env::remove_var("TYPESAFE_API_KEY");
+}

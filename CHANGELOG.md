@@ -7,14 +7,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-18
+
+### Fixed
+
+- **Bug #1: Auth headers missing with custom HTTP client**: When a custom
+  `reqwest::Client` was supplied via `with_http_client()`, the `Authorization`,
+  `Accept`, and `x-typesafe-sdk` headers were only set as default headers on
+  the auto-built client — not on the custom one. Headers are now attached
+  per-request so they work with both paths.
+- **Bug #2: `extra_body` could bypass validation**: A non-object `extra_body`
+  was silently dropped instead of rejected. `extra_body` that overrides
+  `model` with an empty string or `questions` with an empty object now
+  triggers re-validation and returns an error.
+- **Bug #3: Protected headers silently ignored**: `with_extra_header()` now
+  rejects protected headers (`authorization`, `accept`, `x-typesafe-sdk`,
+  `content-type`, `content-length`, `transfer-encoding`, `host`, `connection`,
+  `cookie`, `proxy-authorization`, `proxy-authenticate`, `te`, `trailer`,
+  `upgrade`) with a `Validation` error instead of silently dropping them.
+- **Bug #4: `SystemOneOpts` Debug leaked sensitive data**: Manual `Debug`
+  impl now redacts `state` and `extra_headers` values.
+- **Bug #5: Unbounded response body and error messages**: Response bodies
+  are now read with a 1 MiB cap via `read_body_capped()`. Error messages
+  extracted from response bodies are truncated to 512 characters.
+- **Bug #6: Redirects could replay POST body and credentials**: The
+  auto-built HTTP client now uses `redirect::Policy::none()` to prevent
+  following redirects that could replay the request body and `Authorization`
+  header to a different host.
+- **Logic #1: Dead `extra_body` field on `SystemOneRequest`**: Removed the
+  unused `extra_body: Option<Value>` field that was never serialized.
+- **Logic #2: `request_id` from body overwritten by `None`**: The
+  `SetMetadata` trait now only sets `request_id` when the header value is
+  `Some`, preserving IDs that may have been in the response body.
+- **Logic #3: `BlockingClient` panicked in async context**: `from_config()`
+  and `from_env()` now detect async context via `Handle::try_current()` and
+  return `ErrorKind::Runtime` instead of panicking. Runtime creation errors
+  also use `ErrorKind::Runtime` instead of `ErrorKind::Validation`.
+- **Logic #4: Retry budget was not a hard cap**: The retry loop now checks
+  elapsed time after each attempt+sleep and stops if the budget has been
+  exceeded, preventing attempts that push further past the deadline.
+- **Standard #1: Double JSON parse eliminated**: `parse_response()` now
+  parses the body once into a `serde_json::Value`, then deserializes `T`
+  from it via `from_value`, reusing the same `Value` for the `raw` field.
+  The `SetRequestId`/`SetRawBody` traits were merged into a single
+  `SetMetadata` trait (not exported).
+- **Standard #2: Broken error-handling example in README**: The README
+  pattern-matched on `TypeSafeError::Authentication(msg)` which does not
+  compile (`TypeSafeError` is a struct, not an enum). Fixed to use
+  `err.kind()` matching. Also fixed stale `x-request-id` →
+  `x-typesafe-request-id` in the [0.2.0] changelog.
+- **Standard #3: `reqwest::Error` leaked in public API**: `ErrorKind::Transport`
+  now wraps `String` instead of `reqwest::Error` via `#[from]`, so `reqwest`
+  no longer appears in the public API surface.
+- **Docs #1: README install version and `ClientConfig` example**: Install
+  version updated from `0.1` to `0.3`. The `ClientConfig` struct literal
+  example (which does not compile due to `#[non_exhaustive]`) replaced with
+  the builder pattern.
+- **Docs #4: Stale `ClientConfig` documentation**: Configuration example now
+  includes `with_http_client()`.
+
+### Changed
+
+- `ErrorKind::Transport` is now `Transport(String)` instead of
+  `Transport(#[from] reqwest::Error)`.
+- `From<reqwest::Error> for TypeSafeError` now wraps the error as a string.
+- `SystemOneOpts` no longer derives `Debug`; a manual impl redacts sensitive
+  fields.
+- `SystemOneRequest` no longer has an `extra_body` field.
+
+### Added
+
+- `ErrorKind::Runtime(String)` variant for blocking client runtime errors.
+- 7 additional tests (123 total: 61 unit, 44 integration, 10 blocking, 8 doc).
+
 ## [0.3.0] - 2026-09-18
 
 ### Added
 
 - **Per-call extra headers**: `SystemOneOpts::with_extra_header()` to attach
   custom headers to a single API call. Protected headers (`Authorization`,
-  `Accept`, `x-typesafe-sdk`) are silently ignored to prevent credential
-  leakage or SDK identification removal.
+  `Accept`, `x-typesafe-sdk`) are rejected with a `Validation` error to
+  prevent credential leakage or SDK identification removal (changed in 0.3.1
+  from silently ignoring).
 - **Per-call timeout override**: `SystemOneOpts::with_timeout()` to override
   the client's default timeout for a single call.
 - **Per-call retry policy override**: `SystemOneOpts::with_retry()` to use a
@@ -46,7 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ListModelsResponse` returning the raw JSON `serde_json::Value`.
 - **`field_path` on validation errors**: `ErrorKind::ResponseValidation` now
   carries an optional `field_path` pinpointing the failing field.
-- **`request_id` on responses and errors**: Captured from the `x-request-id`
+- **`request_id` on responses and errors**: Captured from the `x-typesafe-request-id`
   response header and injected into both `TypeSafeError` and response types.
 - **Retry budget**: `RetryPolicy::with_budget()` to cap total retry time.
 - **`retry-after-ms` header**: Honored alongside the standard `Retry-After`
