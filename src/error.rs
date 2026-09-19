@@ -5,6 +5,8 @@
 //! limits, bad requests, connection failures, timeouts, and response
 //! validation.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 /// The root error type returned by all SDK operations.
@@ -52,8 +54,8 @@ pub enum TypeSafeError {
     Connection(String),
 
     /// The request timed out.
-    #[error("request timed out after {0}s")]
-    Timeout(u64),
+    #[error("request timed out after {0:?}")]
+    Timeout(Duration),
 
     /// The response body did not match the expected schema.
     #[error("response validation error: {0}")]

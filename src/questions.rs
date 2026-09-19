@@ -244,6 +244,11 @@ pub(crate) fn validate_questions(
     }
 
     for (name, question) in questions {
+        if name.trim().is_empty() {
+            return Err(crate::error::TypeSafeError::Validation(
+                "Question names cannot be empty or whitespace.".to_string(),
+            ));
+        }
         match question {
             Question::Choice(choice) => {
                 if choice.criteria.len() < 2 {
@@ -331,6 +336,30 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("At least one question is required"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_question_name() {
+        let mut questions = HashMap::new();
+        questions.insert("".to_string(), Question::Noul(noul("?")));
+        let result = validate_questions(&questions);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Question names cannot be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_whitespace_question_name() {
+        let mut questions = HashMap::new();
+        questions.insert("   ".to_string(), Question::Noul(noul("?")));
+        let result = validate_questions(&questions);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Question names cannot be empty"));
     }
 
     #[test]

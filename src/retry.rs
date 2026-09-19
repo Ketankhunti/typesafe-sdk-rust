@@ -65,7 +65,11 @@ impl RetryPolicy {
     /// backoff: `base_delay * 2^attempt`, capped at `max_delay`.
     pub fn delay_for(&self, attempt: u32) -> Duration {
         let exp = attempt.min(30); // prevent overflow
-        let raw = self.base_delay.as_millis().saturating_mul(1u128 << exp) as u64;
+        let raw = self
+            .base_delay
+            .as_millis()
+            .saturating_mul(1u128 << exp)
+            .min(u64::MAX as u128) as u64;
         let capped = raw.min(self.max_delay.as_millis() as u64);
         Duration::from_millis(capped)
     }

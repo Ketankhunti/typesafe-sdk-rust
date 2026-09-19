@@ -164,6 +164,13 @@ impl TypeSafeClient {
         config.base_url = config.base_url.trim().trim_end_matches('/').to_string();
         validate_base_url(&config.base_url)?;
 
+        // Validate the default model name.
+        if config.default_model.trim().is_empty() {
+            return Err(TypeSafeError::Validation(
+                "Default model name cannot be empty.".to_string(),
+            ));
+        }
+
         // Build the auth header once. Marking it sensitive keeps the key out
         // of reqwest's debug output.
         let mut auth =
@@ -246,6 +253,15 @@ impl TypeSafeClient {
     /// Use [`system_one_with_model`](Self::system_one_with_model) to override
     /// the client's default model.
     ///
+    /// # Retry safety
+    ///
+    /// This is a `POST` request. The SDK automatically retries on transient
+    /// failures (429, 5xx, connection errors, timeouts), but a timeout does
+    /// not guarantee the server did not process the request. If the endpoint
+    /// has side effects (credit consumption, usage recording, downstream
+    /// triggers), a retry may result in duplicate processing. Future versions
+    /// will support an `Idempotency-Key` header to make retries safe.
+    ///
     /// # Errors
     /// - [`TypeSafeError::Validation`] if questions are empty or a choice or
     ///   score question has fewer than two criteria.
@@ -271,9 +287,16 @@ impl TypeSafeClient {
     ) -> Result<SystemOneResponse> {
         validate_questions(&questions)?;
 
+        let model_name = model.unwrap_or(&self.config.default_model);
+        if model_name.trim().is_empty() {
+            return Err(TypeSafeError::Validation(
+                "Model name cannot be empty.".to_string(),
+            ));
+        }
+
         let request = SystemOneRequest {
             state: state.into(),
-            model: model.unwrap_or(&self.config.default_model).to_string(),
+            model: model_name.to_string(),
             questions,
         };
 
@@ -438,7 +461,7 @@ impl TypeSafeClient {
 ///   non-retryable [`TypeSafeError::Transport`]
 fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> TypeSafeError {
     if e.is_timeout() {
-        TypeSafeError::Timeout(timeout.as_secs())
+        TypeSafeError::Timeout(timeout)
     } else if e.is_connect() || e.is_request() || e.is_body() {
         TypeSafeError::Connection(e.to_string())
     } else {
@@ -474,9 +497,9 @@ fn validate_base_url(raw: &str) -> Result<()> {
 
     match (url.scheme(), url.host_str()) {
         ("https", Some(_)) => Ok(()),
-        ("http", Some("localhost" | "127.0.0.1" | "[::1]")) => Ok(()),
+        ("http", Some("localhost" | "127.0.0.1" | "::1" | "[::1]")) => Ok(()),
         (scheme, _) => Err(TypeSafeError::Validation(format!(
-            "Base URL must use https:// (or http:// for localhost/127.0.0.1/[::1] during development); got scheme `{scheme}` and an unsupported host."
+            "Base URL must use https:// (or http:// for localhost/127.0.0.1/::1 during development); got scheme `{scheme}` and an unsupported host."
         ))),
     }
 }
@@ -669,5 +692,37 @@ mod tests {
             "got {mapped:?}"
         );
         assert!(!mapped.is_retryable());
+    }
+
+    /// IPv6 loopback `::1` should be accepted (reqwest's `host_str()` returns
+    /// `::1` without brackets).
+    #[test]
+    fn base_url_accepts_ipv6_loopback() {
+        assert!(validate_base_url("http://[::1]:8080").is_ok());
+        assert!(validate_base_url("http://[::1]").is_ok());
+    }
+
+    #[test]
+    fn from_config_rejects_empty_default_model() {
+        let config = ClientConfig {
+            api_key: "test".to_string(),
+            default_model: "  ".to_string(),
+            ..ClientConfig::default()
+        };
+        let err = TypeSafeClient::from_config(config).unwrap_err();
+        assert!(
+            matches!(err, TypeSafeError::Validation(ref m) if m.contains("model")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn timeout_error_preserves_subsecond_duration() {
+        let err = TypeSafeError::Timeout(Duration::from_millis(150));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("150ms"),
+            "expected 150ms in message, got: {msg}"
+        );
     }
 }

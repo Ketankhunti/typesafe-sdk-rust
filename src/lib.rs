@@ -36,11 +36,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations)]
 
-pub mod client;
-pub mod error;
-pub mod questions;
-pub mod retry;
-pub mod types;
+mod client;
+mod error;
+mod questions;
+mod retry;
+mod types;
 
 pub use client::{ClientConfig, TypeSafeClient};
 pub use error::{Result, TypeSafeError};

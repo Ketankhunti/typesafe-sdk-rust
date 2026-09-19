@@ -678,3 +678,57 @@ fn sends_accept_json_header() {
         "missing Accept header in request:\n{request}"
     );
 }
+
+#[test]
+fn rejects_empty_model_name() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let err = rt
+        .block_on(async {
+            client
+                .system_one_with_model("test", billing_question(), Some("  "))
+                .await
+        })
+        .unwrap_err();
+
+    assert!(
+        matches!(err, TypeSafeError::Validation(ref m) if m.contains("Model name")),
+        "got {err:?}"
+    );
+}
+
+#[test]
+fn rejects_empty_question_name() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let mut questions = std::collections::HashMap::new();
+    questions.insert(
+        "".to_string(),
+        typesafe_sdk::noul("Is this about billing?").into(),
+    );
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let err = rt
+        .block_on(async { client.system_one("test", questions).await })
+        .unwrap_err();
+
+    assert!(
+        matches!(err, TypeSafeError::Validation(ref m) if m.contains("Question names")),
+        "got {err:?}"
+    );
+}
