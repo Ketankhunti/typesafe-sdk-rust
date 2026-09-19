@@ -8,7 +8,7 @@
 //! Set `TYPESAFE_API_KEY` in your environment, then:
 //!
 //! ```no_run
-//! use typesafe_sdk::{TypeSafeClient, noul, choice, score, Question};
+//! use typesafe_ai_sdk::{TypeSafeClient, noul, choice, score, Question};
 //! use std::collections::HashMap;
 //!
 //! #[tokio::main]

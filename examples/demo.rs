@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use typesafe_sdk::{choice, noul, score, TypeSafeClient};
+use typesafe_ai_sdk::{choice, noul, score, TypeSafeClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // -----------------------------------------------------------------------
     // Example 1 — Noul + Choice + Score in a single system_one call
     // -----------------------------------------------------------------------
-    let mut questions: HashMap<String, typesafe_sdk::Question> = HashMap::new();
+    let mut questions: HashMap<String, typesafe_ai_sdk::Question> = HashMap::new();
     questions.insert("billing".to_string(), noul("Is this about billing?").into());
     questions.insert(
         "tone".to_string(),

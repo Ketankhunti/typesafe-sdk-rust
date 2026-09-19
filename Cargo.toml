@@ -1,10 +1,11 @@
 [package]
-name = "typesafe-sdk"
+name = "typesafe-ai-sdk"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 description = "Rust SDK for TypeSafe AI — typed judgments from System One models like Jev"
+readme = "README.md"
 homepage = "https://typesafe.ai"
 repository = "https://github.com/Ketankhunti/typesafe-sdk-rust"
 authors = ["Ketan Khunti <khuntiketan50@gmail.com>"]

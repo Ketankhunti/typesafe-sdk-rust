@@ -8,7 +8,7 @@
 //!
 //! # Example
 //! ```no_run
-//! use typesafe_sdk::{TypeSafeClient, noul, choice, score};
+//! use typesafe_ai_sdk::{TypeSafeClient, noul, choice, score};
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {

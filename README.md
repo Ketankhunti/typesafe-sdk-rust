@@ -1,8 +1,8 @@
-# typesafe-sdk-rust
+# typesafe-ai-sdk
 
-[![crates.io](https://img.shields.io/crates/v/typesafe-sdk.svg)](https://crates.io/crates/typesafe-sdk)
-[![docs.rs](https://docs.rs/typesafe-sdk/badge.svg)](https://docs.rs/typesafe-sdk)
-[![license](https://img.shields.io/crates/l/typesafe-sdk.svg)](LICENSE)
+[![crates.io](https://img.shields.io/crates/v/typesafe-ai-sdk.svg)](https://crates.io/crates/typesafe-ai-sdk)
+[![docs.rs](https://docs.rs/typesafe-ai-sdk/badge.svg)](https://docs.rs/typesafe-ai-sdk)
+[![license](https://img.shields.io/crates/l/typesafe-ai-sdk.svg)](LICENSE)
 
 Rust SDK for [TypeSafe AI](https://typesafe.ai) — typed judgments from System One
 models like **Jev**.
@@ -16,7 +16,7 @@ branch on, rank with, or feed into downstream logic.
 
 ```toml
 [dependencies]
-typesafe-sdk = "0.1"
+typesafe-ai-sdk = "0.1"
 ```
 
 > Requires Rust 1.88+ and uses `rustls-tls` (no OpenSSL dependency).
@@ -32,7 +32,7 @@ export TYPESAFE_API_KEY=apikey_...
 Ask a question:
 
 ```rust,no_run
-use typesafe_sdk::{TypeSafeClient, noul, choice, score, Question};
+use typesafe_ai_sdk::{TypeSafeClient, noul, choice, score, Question};
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -89,7 +89,7 @@ run in parallel and share the same state.
 ### Noul — yes/no
 
 ```rust
-use typesafe_sdk::noul;
+use typesafe_ai_sdk::noul;
 
 let q = noul("Does this message convey urgency?");
 ```
@@ -97,7 +97,7 @@ let q = noul("Does this message convey urgency?");
 ### Choice — pick one option
 
 ```rust
-use typesafe_sdk::choice;
+use typesafe_ai_sdk::choice;
 use std::collections::HashMap;
 
 let q = choice("Which team should handle this?", {
@@ -111,7 +111,7 @@ let q = choice("Which team should handle this?", {
 ### Score — rate on a rubric
 
 ```rust
-use typesafe_sdk::score;
+use typesafe_ai_sdk::score;
 
 let q = score("How frustrated is the customer?", vec![
     Some("Calm".into()),
@@ -124,7 +124,7 @@ let q = score("How frustrated is the customer?", vec![
 
 ```rust
 # use std::time::Duration;
-# use typesafe_sdk::{TypeSafeClient, ClientConfig, RetryPolicy};
+# use typesafe_ai_sdk::{TypeSafeClient, ClientConfig, RetryPolicy};
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 // From environment variables (TYPESAFE_API_KEY, TYPESAFE_BASE_URL, TYPESAFE_DEFAULT_MODEL)
 let client = TypeSafeClient::from_env()?;
@@ -161,7 +161,7 @@ All SDK operations return `Result<T, TypeSafeError>`. Errors map to typed
 variants:
 
 ```rust
-use typesafe_sdk::TypeSafeError;
+use typesafe_ai_sdk::TypeSafeError;
 
 match client.system_one(state, questions).await {
     Ok(response) => { /* ... */ }

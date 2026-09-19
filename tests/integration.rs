@@ -9,7 +9,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use typesafe_sdk::{ClientConfig, RetryPolicy, TypeSafeClient, TypeSafeError};
+use typesafe_ai_sdk::{ClientConfig, RetryPolicy, TypeSafeClient, TypeSafeError};
 
 // ---------------------------------------------------------------------------
 // Mock server helpers
@@ -145,11 +145,11 @@ fn test_client(url: &str) -> TypeSafeClient {
 }
 
 /// Create a single-question map for system_one calls.
-fn billing_question() -> std::collections::HashMap<String, typesafe_sdk::Question> {
+fn billing_question() -> std::collections::HashMap<String, typesafe_ai_sdk::Question> {
     let mut q = std::collections::HashMap::new();
     q.insert(
         "billing".to_string(),
-        typesafe_sdk::noul("Is this about billing?").into(),
+        typesafe_ai_sdk::noul("Is this about billing?").into(),
     );
     q
 }
@@ -719,7 +719,7 @@ fn rejects_empty_question_name() {
     let mut questions = std::collections::HashMap::new();
     questions.insert(
         "".to_string(),
-        typesafe_sdk::noul("Is this about billing?").into(),
+        typesafe_ai_sdk::noul("Is this about billing?").into(),
     );
 
     let rt = tokio::runtime::Runtime::new().unwrap();
