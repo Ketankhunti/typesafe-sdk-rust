@@ -806,6 +806,43 @@ impl TypeSafeClient {
                     .and_then(parse_retry_after)
             });
 
+        // For retryable error statuses, classify the error *before* reading
+        // the body. This ensures an oversized 503/5xx response is still
+        // retried rather than becoming a non-retryable `Transport` error
+        // from the body-size cap.
+        let retryable_status = matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS
+                | StatusCode::INTERNAL_SERVER_ERROR
+                | StatusCode::BAD_GATEWAY
+                | StatusCode::SERVICE_UNAVAILABLE
+                | StatusCode::GATEWAY_TIMEOUT
+        ) || status.as_u16() == 529;
+
+        if retryable_status {
+            // Read the body for the error message, but if the body read
+            // itself fails (timeout, oversized), still return the retryable
+            // error kind — the status code is authoritative.
+            let text = match read_body_capped(response, MAX_RESPONSE_BODY_BYTES).await {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(_) => String::new(),
+            };
+            let message = Self::extract_error_message(&text)
+                .map(|m| truncate(&m, MAX_ERROR_BODY_CHARS))
+                .unwrap_or_else(|| truncate(&text, MAX_ERROR_BODY_CHARS));
+            let kind = if status == StatusCode::TOO_MANY_REQUESTS {
+                ErrorKind::RateLimit(message)
+            } else if status.as_u16() == 529 {
+                ErrorKind::Overloaded(message)
+            } else {
+                ErrorKind::InternalServer(message)
+            };
+            return Err(Failure {
+                error: TypeSafeError::with_request_id(kind, request_id),
+                retry_after,
+            });
+        }
+
         // Read the body with a size cap to protect against unbounded memory
         // consumption from a malicious or buggy server.
         let bytes = read_body_capped(response, MAX_RESPONSE_BODY_BYTES).await?;
@@ -839,8 +876,10 @@ impl TypeSafeClient {
             return Ok(result);
         }
 
-        // Map HTTP status codes to typed errors, mirroring the Python/JS SDKs.
-        // Truncate the extracted message to prevent unbounded error strings.
+        // Map remaining HTTP status codes to typed errors, mirroring the
+        // Python/JS SDKs. Retryable statuses (429, 500, 502, 503, 504, 529)
+        // are handled above. Truncate the extracted message to prevent
+        // unbounded error strings.
         let message = Self::extract_error_message(&text)
             .map(|m| truncate(&m, MAX_ERROR_BODY_CHARS))
             .unwrap_or_else(|| truncate(&text, MAX_ERROR_BODY_CHARS));
@@ -849,12 +888,7 @@ impl TypeSafeClient {
             StatusCode::BAD_REQUEST => ErrorKind::BadRequest(message),
             StatusCode::NOT_FOUND => ErrorKind::NotFound(message),
             StatusCode::UNPROCESSABLE_ENTITY => ErrorKind::UnprocessableEntity(message),
-            StatusCode::TOO_MANY_REQUESTS => ErrorKind::RateLimit(message),
-            StatusCode::INTERNAL_SERVER_ERROR
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT => ErrorKind::InternalServer(message),
-            s if s.as_u16() == 529 => ErrorKind::Overloaded(message),
+            StatusCode::REQUEST_TIMEOUT => ErrorKind::Timeout(Duration::from_secs(0)),
             _ => ErrorKind::Api {
                 status: status.as_u16(),
                 message,

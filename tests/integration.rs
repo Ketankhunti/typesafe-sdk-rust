@@ -409,6 +409,48 @@ fn maps_500_to_internal_server_error_and_retries() {
     );
 }
 
+/// HTTP 408 Request Timeout should be classified as a retryable `Timeout`
+/// error, not a generic `Api` error.
+#[test]
+fn maps_408_to_timeout_and_retries() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![
+        http_response(
+            408,
+            "Request Timeout",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"timeout"}}"#,
+        ),
+        http_response(
+            408,
+            "Request Timeout",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"timeout"}}"#,
+        ),
+        http_response(
+            408,
+            "Request Timeout",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"timeout"}}"#,
+        ),
+        http_response(
+            408,
+            "Request Timeout",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"timeout"}}"#,
+        ),
+    ]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "got {err:?}");
+    assert!(err.is_retryable());
+}
+
 #[test]
 fn maps_529_to_overloaded_error() {
     let server = MockServer::new();
@@ -504,7 +546,10 @@ fn timeout_maps_to_timeout_error() {
             if let Ok((mut stream, _)) = listener.accept() {
                 // Read the request but never respond.
                 let _ = read_request(&mut stream);
-                std::thread::sleep(Duration::from_secs(30));
+                // Hold the connection open briefly; the client times out
+                // after 100ms and moves on. The stream drops when the loop
+                // iteration ends, closing the connection.
+                std::thread::sleep(Duration::from_millis(500));
             }
         }
     });
@@ -798,7 +843,10 @@ fn response_body_timeout_is_not_retryable() {
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
                 // Hold the connection open but never send the body.
-                std::thread::sleep(Duration::from_secs(30));
+                // The client times out after 200ms; 500ms is enough to
+                // keep the connection alive past the timeout without
+                // leaving a long-lived thread.
+                std::thread::sleep(Duration::from_millis(500));
             }
         }
     });
@@ -818,6 +866,53 @@ fn response_body_timeout_is_not_retryable() {
     // Body-read timeout must be Transport (non-retryable), not Timeout.
     assert!(matches!(err.kind(), ErrorKind::Transport(_)), "got {err:?}");
     assert!(!err.is_retryable());
+}
+
+/// An oversized 503 response body must still be classified as a retryable
+/// `InternalServer` error, not a non-retryable `Transport` error from the
+/// body-size cap. The HTTP status code is authoritative for retry decisions.
+#[test]
+fn oversized_503_body_is_still_retryable() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
+    std::thread::spawn(move || {
+        for _ in 0..3 {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_request(&mut stream);
+                // Send a 503 with a body larger than MAX_RESPONSE_BODY_BYTES.
+                let big_body = "x".repeat(2 * 1024 * 1024); // 2 MiB
+                let resp = format!(
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    big_body.len(),
+                    big_body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(50));
+                drop(stream);
+            }
+        }
+    });
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+
+    // Must be InternalServer (retryable), not Transport (non-retryable).
+    assert!(
+        matches!(err.kind(), ErrorKind::InternalServer(_)),
+        "got {err:?}"
+    );
+    assert!(err.is_retryable());
 }
 
 #[test]

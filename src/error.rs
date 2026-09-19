@@ -94,7 +94,7 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// Returns `true` if this error is retryable (rate limit, overload,
-    /// server error, connection failure, or timeout).
+    /// server error, connection failure, or timeout — including HTTP 408).
     ///
     /// `Transport` errors (body read, builder, redirect, decode) are
     /// deterministic or occur after the server has already processed the
