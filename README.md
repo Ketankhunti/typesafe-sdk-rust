@@ -174,7 +174,7 @@ match client.system_one(state, questions).await {
 
 The SDK automatically retries on `429 Too Many Requests`, `529 Overloaded`,
 and `500`/`502`/`503`/`504` server errors, as well as network timeouts and
-connection failures, with exponential backoff and full jitter.
+connection failures, with exponential backoff and equal jitter.
 
 ## License
 

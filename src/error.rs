@@ -54,7 +54,7 @@ pub enum TypeSafeError {
     Connection(String),
 
     /// The request timed out.
-    #[error("request timed out after {0:?}")]
+    #[error("request timed out (configured timeout: {0:?})")]
     Timeout(Duration),
 
     /// The response body did not match the expected schema.

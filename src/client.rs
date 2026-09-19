@@ -67,6 +67,10 @@ pub struct ClientConfig {
     /// from the `TYPESAFE_API_KEY` environment variable.
     pub api_key: String,
     /// API root. Defaults to `https://api.typesafe.ai`.
+    ///
+    /// A base path is supported and preserved: e.g. `https://example.com/api`
+    /// produces endpoints like `https://example.com/api/v1/systemone`.
+    /// Credentials, query parameters, and fragments are rejected.
     pub base_url: String,
     /// Default model. Defaults to `jev-latest`.
     pub default_model: String,
@@ -455,14 +459,19 @@ impl TypeSafeClient {
 /// Map a `reqwest` error to the appropriate `TypeSafeError` variant.
 ///
 /// - timeouts -> [`TypeSafeError::Timeout`], reporting the *configured* timeout
-/// - connect / request / body failures (refused, reset, truncated body) ->
-///   [`TypeSafeError::Connection`]
-/// - everything else (builder, redirect, ...) is deterministic, so it stays a
-///   non-retryable [`TypeSafeError::Transport`]
+/// - connect failures (refused, reset, DNS) -> [`TypeSafeError::Connection`]
+/// - body failures (truncated response body) -> [`TypeSafeError::Connection`]
+/// - everything else (builder, redirect, decode, request construction) is
+///   deterministic, so it stays a non-retryable [`TypeSafeError::Transport`]
+///
+/// `is_request()` is intentionally **not** classified as `Connection` because
+/// it covers the entire request lifecycle, including non-retryable errors like
+/// builder failures, redirect loops, and decode errors. Only `is_connect()`
+/// and `is_body()` — which indicate network-level failures — are retryable.
 fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> TypeSafeError {
     if e.is_timeout() {
         TypeSafeError::Timeout(timeout)
-    } else if e.is_connect() || e.is_request() || e.is_body() {
+    } else if e.is_connect() || e.is_body() {
         TypeSafeError::Connection(e.to_string())
     } else {
         TypeSafeError::Transport(e)
@@ -494,6 +503,18 @@ fn truncate(s: &str, max_chars: usize) -> String {
 fn validate_base_url(raw: &str) -> Result<()> {
     let url = reqwest::Url::parse(raw)
         .map_err(|e| TypeSafeError::Validation(format!("Base URL is not a valid URL: {e}")))?;
+
+    // Reject credentials, query parameters, and fragments — a base URL
+    // should be a bare origin + optional path.
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(TypeSafeError::Validation(
+            "Base URL must not contain credentials, query parameters, or fragments.".to_string(),
+        ));
+    }
 
     match (url.scheme(), url.host_str()) {
         ("https", Some(_)) => Ok(()),
@@ -724,5 +745,23 @@ mod tests {
             msg.contains("150ms"),
             "expected 150ms in message, got: {msg}"
         );
+    }
+
+    #[test]
+    fn base_url_rejects_credentials() {
+        assert!(validate_base_url("https://user:password@api.typesafe.ai").is_err());
+        assert!(validate_base_url("https://user@api.typesafe.ai").is_err());
+    }
+
+    #[test]
+    fn base_url_rejects_query_and_fragment() {
+        assert!(validate_base_url("https://api.typesafe.ai?foo=bar").is_err());
+        assert!(validate_base_url("https://api.typesafe.ai#fragment").is_err());
+    }
+
+    #[test]
+    fn base_url_accepts_path() {
+        assert!(validate_base_url("https://api.typesafe.ai/api").is_ok());
+        assert!(validate_base_url("https://api.typesafe.ai/v1/").is_ok());
     }
 }
