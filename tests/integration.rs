@@ -1201,9 +1201,7 @@ fn extra_headers_protected_headers_are_rejected() {
         .with_extra_header("x-typesafe-sdk", "fake-sdk/0.0.0");
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async {
-        client.system_one_with_opts(billing_question(), opts).await
-    });
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
 
     assert!(
         result.is_err(),
@@ -1460,12 +1458,10 @@ fn extra_body_cannot_empty_questions() {
 
     // Override questions with an empty object via extra_body — should be
     // rejected by re-validation, not silently accepted.
-    let opts = typesafeai_sdk::SystemOneOpts::new()
-        .with_extra_body(serde_json::json!({"questions": {}}));
+    let opts =
+        typesafeai_sdk::SystemOneOpts::new().with_extra_body(serde_json::json!({"questions": {}}));
 
-    let result = rt.block_on(async {
-        client.system_one_with_opts(billing_question(), opts).await
-    });
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
 
     let err = result.unwrap_err();
     assert!(
@@ -1489,12 +1485,10 @@ fn extra_body_cannot_empty_model() {
 
     // Override model with an empty string via extra_body — should be
     // rejected by re-validation.
-    let opts = typesafeai_sdk::SystemOneOpts::new()
-        .with_extra_body(serde_json::json!({"model": ""}));
+    let opts =
+        typesafeai_sdk::SystemOneOpts::new().with_extra_body(serde_json::json!({"model": ""}));
 
-    let result = rt.block_on(async {
-        client.system_one_with_opts(billing_question(), opts).await
-    });
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
 
     let err = result.unwrap_err();
     assert!(
@@ -1517,12 +1511,9 @@ fn extra_body_rejects_non_object() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // A non-object extra_body (array) should be rejected.
-    let opts = typesafeai_sdk::SystemOneOpts::new()
-        .with_extra_body(serde_json::json!([1, 2, 3]));
+    let opts = typesafeai_sdk::SystemOneOpts::new().with_extra_body(serde_json::json!([1, 2, 3]));
 
-    let result = rt.block_on(async {
-        client.system_one_with_opts(billing_question(), opts).await
-    });
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
 
     let err = result.unwrap_err();
     assert!(
@@ -1576,10 +1567,7 @@ fn does_not_follow_redirects() {
          \r\n"
     );
 
-    let (addr, _captured) = capture_request_and_reply(
-        listener,
-        redirect_response,
-    );
+    let (addr, _captured) = capture_request_and_reply(listener, redirect_response);
 
     let config = ClientConfig::new("test_key")
         .with_base_url(format!("http://{addr}"))

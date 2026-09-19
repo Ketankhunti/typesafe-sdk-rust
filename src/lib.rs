@@ -52,8 +52,8 @@ pub use questions::{
 };
 pub use retry::RetryPolicy;
 pub use types::{
-    Answer, ChoiceAnswer, ListModelsResponse, ModelCard, NoulAnswer, ScoreAnswer,
-    SystemOneRequest, SystemOneResponse, Usage,
+    Answer, ChoiceAnswer, ListModelsResponse, ModelCard, NoulAnswer, ScoreAnswer, SystemOneRequest,
+    SystemOneResponse, Usage,
 };
 
 #[cfg(feature = "blocking")]

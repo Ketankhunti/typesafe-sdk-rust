@@ -44,9 +44,7 @@ use serde_json::Value;
 use crate::error::{ErrorKind, Result, TypeSafeError};
 use crate::questions::{validate_questions, Question};
 use crate::retry::{jitter_seed, RetryPolicy};
-use crate::types::{
-    ListModelsResponse, SetMetadata, SystemOneRequest, SystemOneResponse,
-};
+use crate::types::{ListModelsResponse, SetMetadata, SystemOneRequest, SystemOneResponse};
 
 /// Maximum response body size to read into memory (1 MiB). Protects against
 /// a malicious or buggy server returning an enormous body that would exhaust

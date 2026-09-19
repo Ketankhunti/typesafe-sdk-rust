@@ -281,9 +281,7 @@ fn blocking_from_config_rejects_async_context() {
     // When called from inside a Tokio runtime, from_config should return
     // an ErrorKind::Runtime error instead of panicking.
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(async {
-        BlockingClient::from_config(ClientConfig::new("test_key"))
-    });
+    let result = rt.block_on(async { BlockingClient::from_config(ClientConfig::new("test_key")) });
 
     let err = result.unwrap_err();
     assert!(
