@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-09-19
+
+### Fixed
+
+- **`ClientConfig` `#[non_exhaustive]` documentation**: The doc said fields are
+  public "for construction", but external crates cannot use struct literals due
+  to `#[non_exhaustive]`. Updated to clarify that fields are public for
+  inspection and mutation, and external crates must use `ClientConfig::new` or
+  `ClientConfig::default` plus builder methods.
+- **`BlockingClient` Drop panic docs**: Removed contradictory "This client
+  never panics" wording. Now accurately states that constructors and methods
+  return `ErrorKind::Runtime` instead of panicking, but `Drop` may panic if the
+  client is dropped inside an async runtime.
+- **`ErrorKind::InternalServer` doc**: Changed from generic "5xx" to "500",
+  "502", "503", or "504" to match the actual implementation.
+- **Oversized retryable response bodies**: `parse_response` now classifies the
+  HTTP status *before* reading the body. A 503 with a body exceeding the 1 MiB
+  cap is now correctly retried as `InternalServer` instead of becoming a
+  non-retryable `Transport` error.
+- **HTTP 408 handling**: Added a dedicated `ErrorKind::RequestTimeout(String)
+  variant for 408 responses, instead of abusing `Timeout(Duration::ZERO)`. This
+  separates server-side timeouts from client-side timeouts.
+- **Test thread cleanup**: Replaced 30-second `thread::sleep` calls in test
+  server threads with 500ms sleeps, eliminating unnecessarily long-lived
+  background threads.
+
 ## [0.3.4] - 2026-09-19
 
 ### Fixed
