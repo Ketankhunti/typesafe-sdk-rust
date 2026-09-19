@@ -84,8 +84,10 @@ const MAX_ERROR_BODY_CHARS: usize = 512;
 
 /// Configuration for constructing a [`TypeSafeClient`].
 ///
-/// All fields are public for construction, but prefer [`ClientConfig::default`]
-/// or the builder methods on [`RetryPolicy`] for common cases.
+/// All fields are public for inspection and mutation, but the struct is
+/// `#[non_exhaustive]`, so external crates must use [`ClientConfig::new`]
+/// or [`ClientConfig::default`] plus the builder methods to construct
+/// configurations.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct ClientConfig {
@@ -888,7 +890,7 @@ impl TypeSafeClient {
             StatusCode::BAD_REQUEST => ErrorKind::BadRequest(message),
             StatusCode::NOT_FOUND => ErrorKind::NotFound(message),
             StatusCode::UNPROCESSABLE_ENTITY => ErrorKind::UnprocessableEntity(message),
-            StatusCode::REQUEST_TIMEOUT => ErrorKind::Timeout(Duration::from_secs(0)),
+            StatusCode::REQUEST_TIMEOUT => ErrorKind::RequestTimeout(message),
             _ => ErrorKind::Api {
                 status: status.as_u16(),
                 message,

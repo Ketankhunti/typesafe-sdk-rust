@@ -43,6 +43,12 @@ pub enum ErrorKind {
     #[error("service overloaded: {0}")]
     Overloaded(String),
 
+    /// `408 Request Timeout` — the server timed out waiting for the request.
+    /// This is a server-side timeout, distinct from the client-side
+    /// [`Timeout`](Self::Timeout) which carries the configured duration.
+    #[error("request timeout: {0}")]
+    RequestTimeout(String),
+
     /// A generic API error for unexpected HTTP status codes.
     #[error("API error (status {status}): {message}")]
     Api {
@@ -94,7 +100,8 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// Returns `true` if this error is retryable (rate limit, overload,
-    /// server error, connection failure, or timeout — including HTTP 408).
+    /// server error, request timeout, connection failure, or client
+    /// timeout).
     ///
     /// `Transport` errors (body read, builder, redirect, decode) are
     /// deterministic or occur after the server has already processed the
@@ -103,6 +110,7 @@ impl ErrorKind {
         matches!(
             self,
             ErrorKind::RateLimit(_)
+                | ErrorKind::RequestTimeout(_)
                 | ErrorKind::Overloaded(_)
                 | ErrorKind::InternalServer(_)
                 | ErrorKind::Connection(_)

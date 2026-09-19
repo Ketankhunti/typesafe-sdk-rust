@@ -409,8 +409,8 @@ fn maps_500_to_internal_server_error_and_retries() {
     );
 }
 
-/// HTTP 408 Request Timeout should be classified as a retryable `Timeout`
-/// error, not a generic `Api` error.
+/// HTTP 408 Request Timeout should be classified as a retryable
+/// `RequestTimeout` error, not a generic `Api` error.
 #[test]
 fn maps_408_to_timeout_and_retries() {
     let server = MockServer::new();
@@ -447,7 +447,10 @@ fn maps_408_to_timeout_and_retries() {
         .block_on(async { client.system_one("test", billing_question()).await })
         .unwrap_err();
 
-    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "got {err:?}");
+    assert!(
+        matches!(err.kind(), ErrorKind::RequestTimeout(_)),
+        "got {err:?}"
+    );
     assert!(err.is_retryable());
 }
 
