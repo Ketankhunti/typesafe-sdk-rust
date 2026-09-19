@@ -2,9 +2,19 @@
 //!
 //! Mirrors the `RetryPolicy` in the Python and JavaScript SDKs: a maximum
 //! number of retries, a base delay, and a cap on the delay between attempts.
-//! The SDK uses exponential backoff with full jitter.
+//! The SDK uses exponential backoff with equal jitter.
 
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
+
+/// Generate a process-wide unique seed for jitter. Uses the standard
+/// library's `RandomState` hasher, which is seeded from the OS RNG at
+/// construction time — so each call returns a different value without
+/// pulling in a `rand` dependency.
+pub fn jitter_seed() -> u64 {
+    RandomState::new().build_hasher().finish()
+}
 
 /// Retry configuration. Fields mirror the Python `RetryPolicy` and the
 /// JavaScript `RetryPolicy` defaults.
@@ -60,33 +70,38 @@ impl RetryPolicy {
         Duration::from_millis(capped)
     }
 
-    /// Compute the delay for a given attempt with full jitter.
+    /// Compute the delay for a given attempt with equal jitter.
     ///
-    /// Returns a random duration in `[0, delay_for(attempt)]` to avoid
-    /// thundering-herd retry storms. When a `Retry-After` hint is available,
-    /// use [`delay_for_retry_after`](Self::delay_for_retry_after) instead.
+    /// Returns a duration in `[base/2, base]` where `base = delay_for(attempt)`.
+    /// Equal jitter guarantees at least half the computed backoff, avoiding
+    /// the near-zero delays that full jitter can produce, while still
+    /// spreading retries across the upper half of the window.
+    /// When a `Retry-After` hint is available, use
+    /// [`delay_for_retry_after`](Self::delay_for_retry_after) instead.
     pub fn delay_for_with_jitter(&self, attempt: u32, jitter_seed: u64) -> Duration {
         let base = self.delay_for(attempt);
-        let jitter_ms = if base.as_millis() == 0 {
-            0
-        } else {
-            // Simple deterministic jitter based on seed — no rand dependency.
-            jitter_seed % base.as_millis() as u64
-        };
-        Duration::from_millis(jitter_ms)
+        let base_ms = base.as_millis() as u64;
+        if base_ms == 0 {
+            return Duration::ZERO;
+        }
+        let half = base_ms / 2;
+        let jitter = jitter_seed % (half + 1);
+        Duration::from_millis(half + jitter)
     }
 
     /// Compute the delay when the server provides a `Retry-After` hint.
     ///
-    /// Returns `max(retry_after, delay_for(attempt))` so the server hint
+    /// Returns `Some(delay)` if the server's hint does not exceed `max_delay`,
+    /// where `delay = max(retry_after, delay_for(attempt))` so the server hint
     /// is respected but never shorter than our own backoff floor.
-    pub fn delay_for_retry_after(&self, attempt: u32, retry_after: Duration) -> Duration {
-        let own = self.delay_for(attempt);
-        if retry_after > own {
-            retry_after
-        } else {
-            own
+    /// Returns `None` if `retry_after` exceeds `max_delay`, signalling the
+    /// retry loop to give up rather than stall the caller.
+    pub fn delay_for_retry_after(&self, attempt: u32, retry_after: Duration) -> Option<Duration> {
+        if retry_after > self.max_delay {
+            return None;
         }
+        let own = self.delay_for(attempt);
+        Some(if retry_after > own { retry_after } else { own })
     }
 }
 
@@ -112,11 +127,24 @@ mod tests {
     }
 
     #[test]
-    fn jitter_stays_within_bounds() {
+    fn equal_jitter_stays_within_bounds() {
         let policy = RetryPolicy::default();
         let base = policy.delay_for(1); // 1000ms
         let jittered = policy.delay_for_with_jitter(1, 42);
+        // Equal jitter: [base/2, base]
+        assert!(jittered >= Duration::from_millis(base.as_millis() as u64 / 2));
         assert!(jittered <= base);
+    }
+
+    #[test]
+    fn equal_jitter_floor_is_half_base() {
+        // With seed 0, jitter is 0, so delay = base/2 (the floor).
+        let policy = RetryPolicy::default().with_base_delay(Duration::from_millis(200));
+        let delay = policy.delay_for_with_jitter(0, 0);
+        assert_eq!(delay, Duration::from_millis(100));
+        // With seed = half, jitter is half, so delay = base.
+        let delay = policy.delay_for_with_jitter(0, 100);
+        assert_eq!(delay, Duration::from_millis(200));
     }
 
     #[test]
@@ -124,9 +152,25 @@ mod tests {
         let policy = RetryPolicy::default();
         // Server says wait 5s, our backoff is 500ms → use 5s
         let delay = policy.delay_for_retry_after(0, Duration::from_secs(5));
-        assert_eq!(delay, Duration::from_secs(5));
+        assert_eq!(delay, Some(Duration::from_secs(5)));
         // Server says wait 100ms, our backoff is 500ms → use 500ms
         let delay = policy.delay_for_retry_after(0, Duration::from_millis(100));
-        assert_eq!(delay, Duration::from_millis(500));
+        assert_eq!(delay, Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn retry_after_gives_up_when_hint_exceeds_max_delay() {
+        let policy = RetryPolicy::default(); // max_delay = 10s
+                                             // Server says wait 30s, our max_delay is 10s → give up (None)
+        let delay = policy.delay_for_retry_after(0, Duration::from_secs(30));
+        assert_eq!(delay, None);
+    }
+
+    #[test]
+    fn jitter_seed_returns_different_values() {
+        // Two calls should (practically always) return different values.
+        let a = jitter_seed();
+        let b = jitter_seed();
+        assert_ne!(a, b);
     }
 }

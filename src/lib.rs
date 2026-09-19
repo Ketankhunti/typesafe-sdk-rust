@@ -20,7 +20,9 @@
 //!
 //!     let response = client.system_one("I was charged twice. Please help.", questions).await?;
 //!
-//!     println!("Billing probability: {}", response.nouls()["billing"].noul);
+//!     if let Some(answer) = response.noul("billing") {
+//!         println!("Billing probability: {}", answer.noul);
+//!     }
 //!     Ok(())
 //! }
 //! ```

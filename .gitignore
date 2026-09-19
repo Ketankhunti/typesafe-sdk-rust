@@ -19,6 +19,6 @@ Thumbs.db
 .env.*
 !.env.example
 
-# Cargo lock — this is a library crate, so we commit Cargo.lock
+# Cargo lock — this is a library crate, so Cargo.lock is NOT committed.
 # See: https://doc.rust-lang.org/cargo/faq.html#why-do-binaries-have-cargolock-in-version-control-but-not-libraries
-# We keep it for reproducible builds of the examples and tests.
+Cargo.lock

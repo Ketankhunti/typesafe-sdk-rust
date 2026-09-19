@@ -61,9 +61,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .system_one("I was charged twice and I need a refund now!", questions)
         .await?;
 
-    println!("Billing: {}", response.nouls()["billing"].noul);
-    println!("Tone:    {}", response.choices()["tone"].choice);
-    println!("Urgency: {}", response.scores()["urgency"].score);
+    if let Some(answer) = response.noul("billing") {
+        println!("Billing: {}", answer.noul);
+    }
+    if let Some(answer) = response.choice("tone") {
+        println!("Tone:    {}", answer.choice);
+    }
+    if let Some(answer) = response.score("urgency") {
+        println!("Urgency: {}", answer.score);
+    }
 
     Ok(())
 }

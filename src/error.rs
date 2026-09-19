@@ -76,6 +76,9 @@ pub enum TypeSafeError {
 impl TypeSafeError {
     /// Returns `true` if this error is retryable (rate limit, overload,
     /// server error, connection failure, or timeout).
+    ///
+    /// `Transport` errors (builder, redirect, decode) are deterministic and
+    /// are **not** retryable.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -84,7 +87,6 @@ impl TypeSafeError {
                 | TypeSafeError::InternalServer(_)
                 | TypeSafeError::Connection(_)
                 | TypeSafeError::Timeout(_)
-                | TypeSafeError::Transport(_)
         )
     }
 }
