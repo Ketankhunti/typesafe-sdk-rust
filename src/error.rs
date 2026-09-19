@@ -79,8 +79,9 @@ impl TypeSafeError {
     /// Returns `true` if this error is retryable (rate limit, overload,
     /// server error, connection failure, or timeout).
     ///
-    /// `Transport` errors (builder, redirect, decode) are deterministic and
-    /// are **not** retryable.
+    /// `Transport` errors (body read, builder, redirect, decode) are
+    /// deterministic or occur after the server has already processed the
+    /// request, and are **not** retryable.
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,

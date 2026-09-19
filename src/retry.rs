@@ -63,6 +63,10 @@ impl RetryPolicy {
 
     /// Compute the delay for a given attempt (0-indexed) using exponential
     /// backoff: `base_delay * 2^attempt`, capped at `max_delay`.
+    ///
+    /// Both the backoff calculation and the cap are protected against
+    /// `u128 → u64` truncation, so arbitrarily large `Duration` values
+    /// in `base_delay` or `max_delay` will not produce incorrect results.
     pub fn delay_for(&self, attempt: u32) -> Duration {
         let exp = attempt.min(30); // prevent overflow
         let raw = self
@@ -70,7 +74,8 @@ impl RetryPolicy {
             .as_millis()
             .saturating_mul(1u128 << exp)
             .min(u64::MAX as u128) as u64;
-        let capped = raw.min(self.max_delay.as_millis() as u64);
+        let max_delay_ms = self.max_delay.as_millis().min(u64::MAX as u128) as u64;
+        let capped = raw.min(max_delay_ms);
         Duration::from_millis(capped)
     }
 
@@ -80,6 +85,12 @@ impl RetryPolicy {
     /// Equal jitter guarantees at least half the computed backoff, avoiding
     /// the near-zero delays that full jitter can produce, while still
     /// spreading retries across the upper half of the window.
+    ///
+    /// Delays are computed in whole milliseconds. With a `base_delay` of 1 ms,
+    /// integer division yields `half = 0` and the jittered delay collapses to
+    /// 0 ms. This is harmless in practice (no one configures sub-millisecond
+    /// retry delays for an HTTP SDK) but is documented for completeness.
+    ///
     /// When a `Retry-After` hint is available, use
     /// [`delay_for_retry_after`](Self::delay_for_retry_after) instead.
     pub fn delay_for_with_jitter(&self, attempt: u32, jitter_seed: u64) -> Duration {
@@ -177,5 +188,18 @@ mod tests {
         // We can't assert uniqueness deterministically, but we can verify
         // it produces a value that works as a modulo operand.
         let _ = s % 100;
+    }
+
+    #[test]
+    fn delay_for_handles_extreme_max_delay() {
+        // A max_delay far beyond u64::MAX millis must not truncate to a
+        // small value and produce an incorrect cap.
+        let policy = RetryPolicy::new(1)
+            .with_base_delay(Duration::from_millis(500))
+            .with_max_delay(Duration::from_secs(u64::MAX / 2));
+        let delay = policy.delay_for(5);
+        // The exponential backoff (500ms * 2^5 = 16000ms) should be well
+        // under the enormous cap, so the delay equals the raw backoff.
+        assert_eq!(delay, Duration::from_millis(16000));
     }
 }

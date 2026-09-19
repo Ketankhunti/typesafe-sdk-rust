@@ -266,6 +266,11 @@ impl TypeSafeClient {
     /// triggers), a retry may result in duplicate processing. Future versions
     /// will support an `Idempotency-Key` header to make retries safe.
     ///
+    /// To avoid replaying a POST whose body the server already processed,
+    /// errors that occur while *reading the response body* are classified as
+    /// non-retryable [`TypeSafeError::Transport`] rather than
+    /// [`TypeSafeError::Connection`].
+    ///
     /// # Errors
     /// - [`TypeSafeError::Validation`] if questions are empty or a choice or
     ///   score question has fewer than two criteria.
@@ -460,18 +465,22 @@ impl TypeSafeClient {
 ///
 /// - timeouts -> [`TypeSafeError::Timeout`], reporting the *configured* timeout
 /// - connect failures (refused, reset, DNS) -> [`TypeSafeError::Connection`]
-/// - body failures (truncated response body) -> [`TypeSafeError::Connection`]
-/// - everything else (builder, redirect, decode, request construction) is
-///   deterministic, so it stays a non-retryable [`TypeSafeError::Transport`]
+/// - everything else (body read, builder, redirect, decode, request
+///   construction) is deterministic or occurs after the server has already
+///   processed the request, so it stays a non-retryable
+///   [`TypeSafeError::Transport`]
 ///
-/// `is_request()` is intentionally **not** classified as `Connection` because
-/// it covers the entire request lifecycle, including non-retryable errors like
-/// builder failures, redirect loops, and decode errors. Only `is_connect()`
-/// and `is_body()` — which indicate network-level failures — are retryable.
+/// `is_request()` and `is_body()` are intentionally **not** classified as
+/// `Connection`. `is_request()` covers the entire request lifecycle, including
+/// non-retryable errors like builder failures, redirect loops, and decode
+/// errors. `is_body()` indicates a failure while *reading the response body*,
+/// which happens **after** the server has already received and processed the
+/// request — retrying a POST in that state risks duplicate side effects.
+/// Only `is_connect()` (pre-request network failure) is retryable.
 fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> TypeSafeError {
     if e.is_timeout() {
         TypeSafeError::Timeout(timeout)
-    } else if e.is_connect() || e.is_body() {
+    } else if e.is_connect() {
         TypeSafeError::Connection(e.to_string())
     } else {
         TypeSafeError::Transport(e)

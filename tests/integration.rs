@@ -732,3 +732,44 @@ fn rejects_empty_question_name() {
         "got {err:?}"
     );
 }
+
+/// A truncated response body (Content-Length claims more bytes than sent)
+/// must map to a non-retryable `Transport` error, not `Connection`, because
+/// the server has already processed the POST by the time the body is read.
+#[test]
+fn truncated_body_is_not_retryable() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
+    std::thread::spawn(move || {
+        for _ in 0..3 {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = read_request(&mut stream);
+                // Claim 9999 bytes but send only a few, then close.
+                let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 9999\r\nConnection: close\r\n\r\n{\"model\":\"jev";
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+                std::thread::sleep(Duration::from_millis(50));
+                drop(stream);
+            }
+        }
+    });
+
+    let config = ClientConfig {
+        api_key: "test_key".to_string(),
+        base_url: format!("http://{addr}"),
+        default_model: "jev-latest".to_string(),
+        timeout: Duration::from_secs(5),
+        retry: RetryPolicy::new(2),
+    };
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+
+    // Body-read failures must be Transport (non-retryable), not Connection.
+    assert!(matches!(err, TypeSafeError::Transport(_)), "got {err:?}");
+    assert!(!err.is_retryable());
+}
