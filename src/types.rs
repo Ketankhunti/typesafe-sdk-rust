@@ -4,6 +4,7 @@
 //! JS SDK's `SystemOneRequest` / `SystemOneResult`.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,7 +21,7 @@ use crate::questions::Question;
 /// - `state` — text, a JSON object, or an array to evaluate.
 /// - `model` — the model name or alias (e.g. `"jev-latest"`).
 /// - `questions` — non-empty map of question names to question objects.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[non_exhaustive]
 pub struct SystemOneRequest {
     /// Text, a JSON object, or an array to evaluate.
@@ -29,6 +30,21 @@ pub struct SystemOneRequest {
     pub model: String,
     /// Non-empty map of question names to question objects.
     pub questions: HashMap<String, Question>,
+}
+
+impl fmt::Debug for SystemOneRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SystemOneRequest")
+            // Redact state — it may contain sensitive user data.
+            .field("state", &"<redacted>")
+            .field("model", &self.model)
+            // Redact questions — instructions may contain sensitive data.
+            .field(
+                "questions",
+                &format!("<{} questions>", self.questions.len()),
+            )
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +167,7 @@ impl Answer {
 /// access them by type using the [`SystemOneResponse::nouls`],
 /// [`SystemOneResponse::choices`], and [`SystemOneResponse::scores`] helper
 /// methods, mirroring the Python SDK's grouped accessors.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[non_exhaustive]
 pub struct SystemOneResponse {
     /// The model used to answer the request.
@@ -168,6 +184,19 @@ pub struct SystemOneResponse {
     /// Useful for accessing fields the SDK doesn't yet model.
     #[serde(skip)]
     pub raw: Option<Value>,
+}
+
+impl fmt::Debug for SystemOneResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SystemOneResponse")
+            .field("model", &self.model)
+            .field("answers", &self.answers)
+            .field("usage", &self.usage)
+            .field("request_id", &self.request_id)
+            // Redact raw — it may contain sensitive data from the API response.
+            .field("raw", &self.raw.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl SystemOneResponse {
@@ -242,7 +271,7 @@ pub struct ModelCard {
 }
 
 /// The response from `GET /v1/models`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[non_exhaustive]
 pub struct ListModelsResponse {
     /// List of available models.
@@ -254,6 +283,17 @@ pub struct ListModelsResponse {
     /// The raw JSON body of the response, injected after deserialization.
     #[serde(skip)]
     pub raw: Option<Value>,
+}
+
+impl fmt::Debug for ListModelsResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ListModelsResponse")
+            .field("models", &self.models)
+            .field("request_id", &self.request_id)
+            // Redact raw — it may contain sensitive data from the API response.
+            .field("raw", &self.raw.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl ListModelsResponse {

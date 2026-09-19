@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-19
+
+### Fixed
+
+- **`budget_exceeded()` overflow**: `elapsed + delay` could theoretically
+  overflow `Duration`'s finite maximum. Changed to
+  `elapsed.saturating_add(delay)` for consistency with the rest of the retry
+  code, which already uses `saturating_mul`.
+- **`SystemOneResponse` Debug exposes `raw`**: The derived `Debug` impl dumped
+  the entire raw API response JSON. Replaced with a custom `Debug` impl that
+  redacts `raw` as `<redacted>`, matching the existing redaction in
+  `SystemOneOpts` and `ClientConfig`.
+- **`ListModelsResponse` Debug exposes `raw`**: Same fix applied — custom
+  `Debug` impl redacts the `raw` field.
+- **`SystemOneRequest` Debug exposes `state`**: The derived `Debug` impl dumped
+  the entire `state` (which may contain sensitive user data) and question
+  instructions. Replaced with a custom `Debug` impl that redacts `state` and
+  shows only the question count.
+- **`jitter_seed()` doc overstates uniqueness**: Changed "each call returns a
+  different value" to "randomly seeded value suitable for jitter" — random
+  values can collide, so the original wording was mathematically inaccurate.
+
 ## [0.3.2] - 2026-09-19
 
 ### Fixed

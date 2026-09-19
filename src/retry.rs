@@ -8,10 +8,9 @@ use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hasher};
 use std::time::Duration;
 
-/// Generate a process-wide unique seed for jitter. Uses the standard
+/// Generate a randomly seeded value suitable for jitter. Uses the standard
 /// library's `RandomState` hasher, which is seeded from the OS RNG at
-/// construction time — so each call returns a different value without
-/// pulling in a `rand` dependency.
+/// construction time, without pulling in a `rand` dependency.
 pub fn jitter_seed() -> u64 {
     RandomState::new().build_hasher().finish()
 }
@@ -150,7 +149,7 @@ impl RetryPolicy {
     /// If no budget is set (`None`), always returns `false`.
     pub fn budget_exceeded(&self, elapsed: Duration, delay: Duration) -> bool {
         match self.budget {
-            Some(budget) => elapsed + delay >= budget,
+            Some(budget) => elapsed.saturating_add(delay) >= budget,
             None => false,
         }
     }
