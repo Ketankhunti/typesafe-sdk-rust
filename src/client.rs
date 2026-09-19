@@ -177,6 +177,11 @@ impl ClientConfig {
     /// client builds one from the other config fields (timeout, default
     /// headers). Use this to share a connection pool or apply custom TLS
     /// settings.
+    ///
+    /// The client is used as-is, so the caller controls redirect behavior.
+    /// The SDK's default client disables redirects to prevent POST replay
+    /// via 307/308; a custom client that follows redirects does not have
+    /// this protection.
     #[must_use]
     pub fn with_http_client(mut self, client: HttpClient) -> Self {
         self.http_client = Some(client);
@@ -513,7 +518,8 @@ impl TypeSafeClient {
     /// # Retry safety
     ///
     /// This is a `POST` request. The SDK automatically retries on transient
-    /// failures (429, 5xx, connection errors, timeouts), but a timeout does
+    /// failures (429, 500, 502, 503, 504, 529, connection errors, timeouts),
+    /// but a timeout does
     /// not guarantee the server did not process the request. If the endpoint
     /// has side effects (credit consumption, usage recording, downstream
     /// triggers), a retry may result in duplicate processing. Future versions

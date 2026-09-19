@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-09-19
+
+### Fixed
+
+- **`system_one` retry doc inaccuracy**: The doc comment said the SDK retries
+  on "5xx" errors, but only `500`, `502`, `503`, `504`, and `529` are actually
+  retried. Updated to list the exact status codes.
+- **`with_http_client` missing redirect note**: The doc did not mention that a
+  custom client controls redirect behavior. Added a note that the SDK's default
+  client disables redirects to prevent POST replay via 307/308, and a custom
+  client that follows redirects does not have this protection.
+
+### Changed
+
+- **CI security audit**: Added a `cargo audit` step to the CI workflow to
+  scan dependencies for known vulnerabilities.
+
 ## [0.3.3] - 2026-09-19
 
 ### Fixed
