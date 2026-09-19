@@ -83,6 +83,10 @@ pub struct ClientConfig {
     pub timeout: Duration,
     /// Retry policy. Defaults to 2 retries with exponential backoff + jitter.
     pub retry: RetryPolicy,
+    /// Custom `reqwest::Client` to use for HTTP requests. If `None`, a new
+    /// client is built from the other config fields. This allows sharing a
+    /// connection pool or using a custom TLS configuration.
+    pub http_client: Option<HttpClient>,
 }
 
 impl Default for ClientConfig {
@@ -93,6 +97,7 @@ impl Default for ClientConfig {
             default_model: DEFAULT_MODEL.to_string(),
             timeout: DEFAULT_TIMEOUT,
             retry: RetryPolicy::default(),
+            http_client: None,
         }
     }
 }
@@ -144,6 +149,16 @@ impl ClientConfig {
         self.retry = retry;
         self
     }
+
+    /// Provide a custom `reqwest::Client` for HTTP requests. If not set, the
+    /// client builds one from the other config fields (timeout, default
+    /// headers). Use this to share a connection pool or apply custom TLS
+    /// settings.
+    #[must_use]
+    pub fn with_http_client(mut self, client: HttpClient) -> Self {
+        self.http_client = Some(client);
+        self
+    }
 }
 
 impl fmt::Debug for ClientConfig {
@@ -154,6 +169,7 @@ impl fmt::Debug for ClientConfig {
             .field("default_model", &self.default_model)
             .field("timeout", &self.timeout)
             .field("retry", &self.retry)
+            .field("http_client", &self.http_client.is_some())
             .finish()
     }
 }
@@ -194,6 +210,25 @@ impl From<TypeSafeError> for Failure {
     }
 }
 
+/// Internal per-call options passed through the retry loop.
+/// `None` fields mean "use the client default".
+struct CallOpts {
+    extra_headers: Vec<(String, String)>,
+    timeout: Option<Duration>,
+    retry: Option<RetryPolicy>,
+}
+
+impl CallOpts {
+    /// Create an empty options set (use all client defaults).
+    fn empty() -> Self {
+        Self {
+            extra_headers: Vec::new(),
+            timeout: None,
+            retry: None,
+        }
+    }
+}
+
 /// Per-call options for [`TypeSafeClient::system_one_with_opts`].
 ///
 /// Built with a builder pattern. Start with [`SystemOneOpts::new`] and chain
@@ -202,11 +237,14 @@ impl From<TypeSafeError> for Failure {
 /// # Example
 /// ```no_run
 /// use typesafeai_sdk::SystemOneOpts;
+/// use std::time::Duration;
 ///
 /// let opts = SystemOneOpts::new()
 ///     .with_model(Some("jev-latest".to_string()))
 ///     .with_state("I was charged twice.")
-///     .with_extra_body(serde_json::json!({"priority": "high"}));
+///     .with_extra_body(serde_json::json!({"priority": "high"}))
+///     .with_timeout(Duration::from_secs(30))
+///     .with_extra_header("X-Trace-Id", "abc123");
 /// ```
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -216,7 +254,15 @@ pub struct SystemOneOpts {
     /// The state to evaluate. If not set, defaults to `null`.
     pub(crate) state: Option<Value>,
     /// Extra fields to merge into the request body for forward compatibility.
+    /// These are merged **last** (last-write-wins): a key that collides with
+    /// `state`, `model`, or `questions` overrides the known field.
     pub(crate) extra_body: Option<Value>,
+    /// Additional headers to send with this call only.
+    pub(crate) extra_headers: Vec<(String, String)>,
+    /// Per-call timeout override. `None` uses the client default.
+    pub(crate) timeout: Option<Duration>,
+    /// Per-call retry policy override. `None` uses the client default.
+    pub(crate) retry: Option<RetryPolicy>,
 }
 
 impl SystemOneOpts {
@@ -240,11 +286,39 @@ impl SystemOneOpts {
     }
 
     /// Set extra fields to merge into the request body for forward
-    /// compatibility. Keys that collide with known fields (`state`, `model`,
-    /// `questions`) are ignored — the known fields take precedence.
+    /// compatibility. Merging is **last-write-wins**: a key that collides
+    /// with `state`, `model`, or `questions` overrides the known field,
+    /// and object values are replaced rather than deep-merged.
     #[must_use = "the returned SystemOneOpts should be used"]
     pub fn with_extra_body(mut self, extra: Value) -> Self {
         self.extra_body = Some(extra);
+        self
+    }
+
+    /// Add a custom header to send with this call only. Headers set here
+    /// are applied on top of the client's default headers. Authentication,
+    /// `Accept`, and SDK identification headers remain protected and cannot
+    /// be overridden.
+    ///
+    /// Can be called multiple times to add multiple headers.
+    #[must_use = "the returned SystemOneOpts should be used"]
+    pub fn with_extra_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.extra_headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Override the timeout for this call only. `None` uses the client default.
+    #[must_use = "the returned SystemOneOpts should be used"]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Override the retry policy for this call only. `None` uses the client
+    /// default.
+    #[must_use = "the returned SystemOneOpts should be used"]
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = Some(retry);
         self
     }
 }
@@ -304,12 +378,18 @@ impl TypeSafeClient {
             HeaderValue::from_static(SDK_USER_AGENT),
         );
 
-        let http = HttpClient::builder()
-            .timeout(config.timeout)
-            .user_agent(SDK_USER_AGENT)
-            .default_headers(headers)
-            .build()
-            .map_err(|e| TypeSafeError::new(ErrorKind::Transport(e)))?;
+        // Use the caller-provided HTTP client if given; otherwise build one
+        // from the config. A provided client is used as-is so the caller
+        // controls TLS, proxies, connection pools, etc.
+        let http = match config.http_client.take() {
+            Some(client) => client,
+            None => HttpClient::builder()
+                .timeout(config.timeout)
+                .user_agent(SDK_USER_AGENT)
+                .default_headers(headers)
+                .build()
+                .map_err(|e| TypeSafeError::new(ErrorKind::Transport(e)))?,
+        };
 
         Ok(Self { config, http })
     }
@@ -456,25 +536,29 @@ impl TypeSafeClient {
             state: opts.state.unwrap_or(Value::Null),
             model: model_name,
             questions,
-            extra_body: opts.extra_body,
+            extra_body: None, // merged below as last-write-wins
         };
 
         let mut body = serde_json::to_value(&request)?;
 
         // Merge extra_body fields at the top level for forward compatibility.
-        // Known fields (state, model, questions) take precedence over
-        // extra_body keys.
-        if let Some(extra) = &request.extra_body {
+        // Last-write-wins: extra_body keys override known fields (state, model,
+        // questions). Object values are replaced rather than deep-merged.
+        if let Some(extra) = &opts.extra_body {
             if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
                 for (k, v) in extra_obj {
-                    if !obj.contains_key(k) {
-                        obj.insert(k.clone(), v.clone());
-                    }
+                    obj.insert(k.clone(), v.clone());
                 }
             }
         }
 
-        self.request_with_retry(Method::POST, SYSTEM_ONE_PATH, Some(body))
+        let call_opts = CallOpts {
+            extra_headers: opts.extra_headers,
+            timeout: opts.timeout,
+            retry: opts.retry,
+        };
+
+        self.request_with_retry_opts(Method::POST, SYSTEM_ONE_PATH, Some(body), &call_opts)
             .await
     }
 
@@ -484,7 +568,7 @@ impl TypeSafeClient {
 
     /// List available models. Sends `GET /v1/models`.
     pub async fn list_models(&self) -> Result<ListModelsResponse> {
-        self.request_with_retry(Method::GET, MODELS_PATH, None)
+        self.request_with_retry_opts(Method::GET, MODELS_PATH, None, &CallOpts::empty())
             .await
     }
 
@@ -492,19 +576,24 @@ impl TypeSafeClient {
     // Internal HTTP + retry
     // -----------------------------------------------------------------------
 
-    async fn request_with_retry<T: serde::de::DeserializeOwned + 'static>(
+    async fn request_with_retry_opts<T: serde::de::DeserializeOwned + 'static>(
         &self,
         method: Method,
         path: &str,
         body: Option<Value>,
+        opts: &CallOpts,
     ) -> Result<T> {
         let url = format!("{}{}", self.config.base_url, path);
-        let retry = &self.config.retry;
+        let retry = opts.retry.as_ref().unwrap_or(&self.config.retry);
+        let timeout = opts.timeout.unwrap_or(self.config.timeout);
 
         let started = std::time::Instant::now();
         let mut attempt = 0;
         loop {
-            match self.attempt_request(&method, &url, body.as_ref()).await {
+            match self
+                .attempt_request(&method, &url, body.as_ref(), opts, timeout)
+                .await
+            {
                 Ok(resp) => return Ok(resp),
                 Err(failure) => {
                     if !failure.error.is_retryable() || attempt >= retry.max_retries {
@@ -539,18 +628,36 @@ impl TypeSafeClient {
         method: &Method,
         url: &str,
         body: Option<&Value>,
+        opts: &CallOpts,
+        timeout: Duration,
     ) -> std::result::Result<T, Failure> {
         // Auth, Accept, User-Agent and X-TypeSafe-SDK are default headers set
         // once in `from_config`; `.json()` sets Content-Type.
-        let mut request = self.http.request(method.clone(), url);
+        let mut request = self.http.request(method.clone(), url).timeout(timeout);
         if let Some(b) = body {
             request = request.json(b);
+        }
+
+        // Apply per-call extra headers. Protected headers (Authorization,
+        // Accept, x-typesafe-sdk) are silently skipped to prevent accidental
+        // credential leakage or SDK identification removal.
+        for (name, value) in &opts.extra_headers {
+            let lower = name.to_ascii_lowercase();
+            if lower == "authorization" || lower == "accept" || lower == "x-typesafe-sdk" {
+                continue;
+            }
+            if let (Ok(hn), Ok(hv)) = (
+                HeaderName::try_from(name.as_str()),
+                HeaderValue::try_from(value.as_str()),
+            ) {
+                request = request.header(hn, hv);
+            }
         }
 
         let response = request
             .send()
             .await
-            .map_err(|e| map_reqwest_error(e, self.config.timeout))?;
+            .map_err(|e| map_reqwest_error(e, timeout))?;
 
         self.parse_response(response).await
     }

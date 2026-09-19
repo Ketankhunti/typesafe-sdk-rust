@@ -35,8 +35,11 @@ impl MockServer {
     fn serve(self, responses: Vec<String>) -> ServerHandle {
         let listener = self.listener;
         let addr = self.addr;
+        let request_count = Arc::new(std::sync::Mutex::new(0));
+        let request_count_clone = request_count.clone();
         let handle = ServerHandle {
             addr,
+            request_count,
             _shutdown: Arc::new(()),
         };
 
@@ -49,6 +52,7 @@ impl MockServer {
                 };
                 // Read and discard the request (we still need to consume it).
                 let _ = read_request(&mut stream);
+                *request_count_clone.lock().unwrap() += 1;
                 let _ = stream.write_all(resp.as_bytes());
                 let _ = stream.flush();
                 // Give the client a moment to read before we close.
@@ -102,12 +106,17 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
 
 struct ServerHandle {
     addr: String,
+    request_count: Arc<std::sync::Mutex<usize>>,
     _shutdown: Arc<()>,
 }
 
 impl ServerHandle {
     fn url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    fn request_count(&self) -> usize {
+        *self.request_count.lock().unwrap()
     }
 }
 
@@ -1011,7 +1020,7 @@ fn extra_body_fields_are_sent_in_request() {
 }
 
 #[test]
-fn extra_body_does_not_override_known_fields() {
+fn extra_body_overrides_known_fields_last_write_wins() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let (addr, captured) = capture_request_and_reply(
         listener,
@@ -1030,9 +1039,10 @@ fn extra_body_does_not_override_known_fields() {
         .with_retry(RetryPolicy::new(0));
     let client = TypeSafeClient::from_config(config).unwrap();
 
-    // Try to override "model" via extra_body — should be ignored.
+    // Override "model" via extra_body — last-write-wins means the extra_body
+    // value should take precedence over the known field.
     let opts = typesafeai_sdk::SystemOneOpts::new()
-        .with_extra_body(serde_json::json!({"model": "evil-model"}));
+        .with_extra_body(serde_json::json!({"model": "custom-model"}));
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let _ = rt
@@ -1042,8 +1052,8 @@ fn extra_body_does_not_override_known_fields() {
     let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
     let body_start = request.find("\r\n\r\n").unwrap() + 4;
     let body: serde_json::Value = serde_json::from_str(&request[body_start..]).unwrap();
-    // The known field "model" should NOT be overridden by extra_body.
-    assert_eq!(body["model"], "jev-latest");
+    // The extra_body value overrides the known field (last-write-wins).
+    assert_eq!(body["model"], "custom-model");
 }
 
 #[test]
@@ -1116,4 +1126,314 @@ fn raw_body_is_captured_on_list_models_response() {
 
     let raw = result.raw().expect("raw body should be captured");
     assert_eq!(raw["models"][0]["name"], "jev-latest");
+}
+
+// ===========================================================================
+// Per-call extra headers
+// ===========================================================================
+
+#[test]
+fn extra_headers_are_sent_in_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (addr, captured) = capture_request_and_reply(
+        listener,
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    );
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_extra_header("X-Trace-Id", "abc-123")
+        .with_extra_header("X-Request-Source", "test-suite");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = rt
+        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
+        .unwrap();
+
+    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let lower = request.to_ascii_lowercase();
+    assert!(
+        lower.contains("x-trace-id: abc-123"),
+        "missing custom header in request:\n{request}"
+    );
+    assert!(
+        lower.contains("x-request-source: test-suite"),
+        "missing second custom header in request:\n{request}"
+    );
+}
+
+#[test]
+fn extra_headers_protected_headers_are_not_overridden() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (addr, captured) = capture_request_and_reply(
+        listener,
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    );
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    // Try to override protected headers — they should be silently ignored.
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_extra_header("Authorization", "Bearer evil-token")
+        .with_extra_header("Accept", "text/html")
+        .with_extra_header("x-typesafe-sdk", "fake-sdk/0.0.0");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = rt
+        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
+        .unwrap();
+
+    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let lower = request.to_ascii_lowercase();
+    // The original auth header should be preserved.
+    assert!(
+        lower.contains("authorization: bearer test_key"),
+        "auth header was overridden:\n{request}"
+    );
+    // Accept should remain application/json.
+    assert!(
+        lower.contains("accept: application/json"),
+        "accept header was overridden:\n{request}"
+    );
+    // SDK header should remain the real version.
+    assert!(
+        !lower.contains("fake-sdk"),
+        "sdk header was overridden:\n{request}"
+    );
+}
+
+// ===========================================================================
+// Per-call timeout
+// ===========================================================================
+
+#[test]
+fn per_call_timeout_overrides_client_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (addr, captured) = capture_request_and_reply(
+        listener,
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    );
+
+    // Client has a 30s timeout, but per-call opts set 5s.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(30))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let opts = typesafeai_sdk::SystemOneOpts::new().with_timeout(Duration::from_secs(5));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = rt
+        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
+        .unwrap();
+
+    // The request should succeed — we just verify the per-call timeout
+    // doesn't break the flow.
+    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(request.contains("POST /v1/systemone"));
+}
+
+// ===========================================================================
+// Per-call retry policy
+// ===========================================================================
+
+#[test]
+fn per_call_retry_overrides_client_retry() {
+    let server = MockServer::new();
+    // First attempt: 429 with Retry-After; second attempt: 200.
+    let handle = server.serve(vec![
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\nRetry-After: 0\r\n",
+            r#"{"error":{"message":"rate limited"}}"#,
+        ),
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    ]);
+
+    // Client has 0 retries (no retry), but per-call opts set 3 retries.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(handle.url())
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_retry(RetryPolicy::new(3).with_base_delay(Duration::from_millis(1)));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
+        .unwrap();
+
+    // Should have retried and succeeded on the second attempt.
+    assert_eq!(result.model, "jev-latest");
+}
+
+#[test]
+fn per_call_retry_zero_overrides_client_retries() {
+    let server = MockServer::new();
+    // Return 429 on every attempt.
+    let handle = server.serve(vec![
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\nRetry-After: 0\r\n",
+            r#"{"error":{"message":"rate limited"}}"#,
+        ),
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\nRetry-After: 0\r\n",
+            r#"{"error":{"message":"rate limited"}}"#,
+        ),
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\nRetry-After: 0\r\n",
+            r#"{"error":{"message":"rate limited"}}"#,
+        ),
+    ]);
+
+    // Client has 3 retries, but per-call opts set 0 retries.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(handle.url())
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(3).with_base_delay(Duration::from_millis(1)));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let opts = typesafeai_sdk::SystemOneOpts::new().with_retry(RetryPolicy::new(0));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
+
+    // Should NOT retry — the per-call 0-retry policy overrides the client's 3.
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(matches!(
+        err.kind(),
+        typesafeai_sdk::ErrorKind::RateLimit(_)
+    ));
+    // Only one request should have been made (no retries).
+    assert_eq!(handle.request_count(), 1);
+}
+
+// ===========================================================================
+// Custom reqwest::Client injection
+// ===========================================================================
+
+#[test]
+fn custom_http_client_is_used() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (addr, captured) = capture_request_and_reply(
+        listener,
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    );
+
+    // Build a custom reqwest client with a distinctive User-Agent.
+    let custom_http = reqwest::Client::builder()
+        .user_agent("my-custom-agent/1.0")
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_http_client(custom_http);
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap();
+
+    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let lower = request.to_ascii_lowercase();
+    // The custom User-Agent should appear in the request.
+    assert!(
+        lower.contains("user-agent: my-custom-agent/1.0"),
+        "custom user-agent not found in request:\n{request}"
+    );
+}
+
+// ===========================================================================
+// extra_body last-write-wins (additional test)
+// ===========================================================================
+
+#[test]
+fn extra_body_overrides_state_field() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (addr, captured) = capture_request_and_reply(
+        listener,
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    );
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    // Set state via opts, then override it via extra_body.
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_state("original state")
+        .with_extra_body(serde_json::json!({"state": "overridden state"}));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = rt
+        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
+        .unwrap();
+
+    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let body_start = request.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(&request[body_start..]).unwrap();
+    // The extra_body value should override the known field.
+    assert_eq!(body["state"], "overridden state");
 }

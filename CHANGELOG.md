@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-18
+
+### Added
+
+- **Per-call extra headers**: `SystemOneOpts::with_extra_header()` to attach
+  custom headers to a single API call. Protected headers (`Authorization`,
+  `Accept`, `x-typesafe-sdk`) are silently ignored to prevent credential
+  leakage or SDK identification removal.
+- **Per-call timeout override**: `SystemOneOpts::with_timeout()` to override
+  the client's default timeout for a single call.
+- **Per-call retry policy override**: `SystemOneOpts::with_retry()` to use a
+  different `RetryPolicy` for a single call without changing the client config.
+- **Custom `reqwest::Client` injection**: `ClientConfig::with_http_client()`
+  to supply a pre-built `reqwest::Client`, enabling shared connection pools,
+  custom TLS configuration, or custom middleware.
+- 7 additional tests (116 total: 61 unit, 39 integration, 8 blocking, 8 doc).
+
+### Changed
+
+- **`extra_body` is now last-write-wins**: Keys in `extra_body` that collide
+  with known fields (`state`, `model`, `questions`) now **override** the known
+  field, matching the Python SDK behavior. Previously, known fields took
+  precedence and extra_body keys were silently dropped on collision.
+
 ## [0.2.0] - 2026-09-18
 
 ### Added
@@ -60,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests (19) and doc tests (5) — all passing.
 - README, LICENSE, and CONTRIBUTING guide.
 
-[Unreleased]: https://github.com/Ketankhunti/typesafe-sdk-rust/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Ketankhunti/typesafe-sdk-rust/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.1.0
 
