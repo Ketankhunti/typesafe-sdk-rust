@@ -641,6 +641,23 @@ mod tests {
         assert_eq!(client.base_url(), "https://api.typesafe.ai");
     }
 
+    /// A base URL with a trailing slash must not produce a double slash
+    /// when joined with a path like `/v1/systemone`.
+    #[test]
+    fn trailing_slash_does_not_produce_double_slash() {
+        let config = ClientConfig {
+            api_key: "test".to_string(),
+            base_url: "https://api.typesafe.ai/v1/".to_string(),
+            ..ClientConfig::default()
+        };
+        let client = TypeSafeClient::from_config(config).unwrap();
+        // Trailing slash is stripped, so joining with "/v1/systemone"
+        // produces a single slash, not "//".
+        let url = format!("{}{}", client.base_url(), "/v1/systemone");
+        assert_eq!(url, "https://api.typesafe.ai/v1/v1/systemone");
+        assert!(!url.contains("//v1"), "double slash in URL: {url}");
+    }
+
     /// Regression: a `starts_with("http://localhost")` check accepted these
     /// look-alikes, sending the API key in plaintext to an attacker's host.
     #[test]
