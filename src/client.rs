@@ -267,9 +267,10 @@ impl TypeSafeClient {
     /// will support an `Idempotency-Key` header to make retries safe.
     ///
     /// To avoid replaying a POST whose body the server already processed,
-    /// errors that occur while *reading the response body* are classified as
-    /// non-retryable [`TypeSafeError::Transport`] rather than
-    /// [`TypeSafeError::Connection`].
+    /// errors that occur while *reading the response body* — including
+    /// timeouts and truncated bodies — are classified as non-retryable
+    /// [`TypeSafeError::Transport`] rather than [`TypeSafeError::Connection`]
+    /// or [`TypeSafeError::Timeout`].
     ///
     /// # Errors
     /// - [`TypeSafeError::Validation`] if questions are empty or a choice or
@@ -397,10 +398,7 @@ impl TypeSafeClient {
             .and_then(|v| v.to_str().ok())
             .and_then(parse_retry_after);
 
-        let text = response
-            .text()
-            .await
-            .map_err(|e| map_reqwest_error(e, self.config.timeout))?;
+        let text = response.text().await.map_err(map_body_error)?;
 
         if status.is_success() {
             return serde_json::from_str(&text).map_err(|e| {
@@ -485,6 +483,16 @@ fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> TypeSafeError {
     } else {
         TypeSafeError::Transport(e)
     }
+}
+
+/// Map an error that occurred while *reading the response body*.
+///
+/// By the time we're reading the body, the server has already received and
+/// processed the request. Any failure here — timeout, truncated body, or
+/// connection reset — must be non-retryable to avoid replaying a POST whose
+/// side effects the server may have already applied.
+fn map_body_error(e: reqwest::Error) -> TypeSafeError {
+    TypeSafeError::Transport(e)
 }
 
 /// Parse a `Retry-After` header value given in seconds.

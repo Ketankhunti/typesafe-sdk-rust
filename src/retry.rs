@@ -182,15 +182,6 @@ mod tests {
     }
 
     #[test]
-    fn jitter_seed_returns_nonzero() {
-        // jitter_seed should return a usable seed value.
-        let s = jitter_seed();
-        // We can't assert uniqueness deterministically, but we can verify
-        // it produces a value that works as a modulo operand.
-        let _ = s % 100;
-    }
-
-    #[test]
     fn delay_for_handles_extreme_max_delay() {
         // A max_delay far beyond u64::MAX millis must not truncate to a
         // small value and produce an incorrect cap.
