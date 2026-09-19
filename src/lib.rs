@@ -42,13 +42,19 @@ mod questions;
 mod retry;
 mod types;
 
-pub use client::{ClientConfig, TypeSafeClient};
-pub use error::{Result, TypeSafeError};
+#[cfg(feature = "blocking")]
+pub mod blocking;
+
+pub use client::{ClientConfig, SystemOneOpts, TypeSafeClient};
+pub use error::{ErrorKind, Result, TypeSafeError};
 pub use questions::{
     choice, noul, score, Choice, Description, Noul, NoulCriteria, Question, Score,
 };
 pub use retry::RetryPolicy;
 pub use types::{
-    Answer, ChoiceAnswer, ListModelsResponse, ModelCard, NoulAnswer, ScoreAnswer, SystemOneRequest,
-    SystemOneResponse, Usage,
+    Answer, ChoiceAnswer, ListModelsResponse, ModelCard, NoulAnswer, ScoreAnswer, SetRawBody,
+    SystemOneRequest, SystemOneResponse, Usage,
 };
+
+#[cfg(feature = "blocking")]
+pub use blocking::BlockingClient;

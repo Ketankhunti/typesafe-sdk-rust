@@ -9,7 +9,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use typesafeai_sdk::{ClientConfig, RetryPolicy, TypeSafeClient, TypeSafeError};
+use typesafeai_sdk::{ClientConfig, ErrorKind, RetryPolicy, TypeSafeClient};
 
 // ---------------------------------------------------------------------------
 // Mock server helpers
@@ -132,15 +132,15 @@ fn models_body() -> String {
 
 /// Create a client pointed at the mock server with fast retries.
 fn test_client(url: &str) -> TypeSafeClient {
-    let config = ClientConfig {
-        api_key: "test_key".to_string(),
-        base_url: url.to_string(),
-        default_model: "jev-latest".to_string(),
-        timeout: Duration::from_secs(5),
-        retry: RetryPolicy::new(3)
-            .with_base_delay(Duration::from_millis(50))
-            .with_max_delay(Duration::from_secs(5)),
-    };
+    let config = ClientConfig::new("test_key")
+        .with_base_url(url.to_string())
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(
+            RetryPolicy::new(3)
+                .with_base_delay(Duration::from_millis(50))
+                .with_max_delay(Duration::from_secs(5)),
+        );
     TypeSafeClient::from_config(config).expect("client")
 }
 
@@ -270,7 +270,7 @@ fn gives_up_when_retry_after_exceeds_max_delay() {
         "should not wait 600s, got {elapsed:?}"
     );
     let err = result.unwrap_err();
-    assert!(matches!(err, TypeSafeError::RateLimit(_)), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::RateLimit(_)), "got {err:?}");
 }
 
 #[test]
@@ -290,7 +290,7 @@ fn maps_401_to_authentication_error() {
         .unwrap_err();
 
     assert!(
-        matches!(err, TypeSafeError::Authentication(_)),
+        matches!(err.kind(), ErrorKind::Authentication(_)),
         "got {err:?}"
     );
 }
@@ -311,7 +311,10 @@ fn maps_400_to_bad_request_error() {
         .block_on(async { client.system_one("test", billing_question()).await })
         .unwrap_err();
 
-    assert!(matches!(err, TypeSafeError::BadRequest(_)), "got {err:?}");
+    assert!(
+        matches!(err.kind(), ErrorKind::BadRequest(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -330,7 +333,7 @@ fn maps_404_to_not_found_error() {
         .block_on(async { client.system_one("test", billing_question()).await })
         .unwrap_err();
 
-    assert!(matches!(err, TypeSafeError::NotFound(_)), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::NotFound(_)), "got {err:?}");
 }
 
 #[test]
@@ -350,7 +353,7 @@ fn maps_422_to_unprocessable_entity_error() {
         .unwrap_err();
 
     assert!(
-        matches!(err, TypeSafeError::UnprocessableEntity(_)),
+        matches!(err.kind(), ErrorKind::UnprocessableEntity(_)),
         "got {err:?}"
     );
 }
@@ -392,7 +395,7 @@ fn maps_500_to_internal_server_error_and_retries() {
         .unwrap_err();
 
     assert!(
-        matches!(err, TypeSafeError::InternalServer(_)),
+        matches!(err.kind(), ErrorKind::InternalServer(_)),
         "got {err:?}"
     );
 }
@@ -433,7 +436,10 @@ fn maps_529_to_overloaded_error() {
         .block_on(async { client.system_one("test", billing_question()).await })
         .unwrap_err();
 
-    assert!(matches!(err, TypeSafeError::Overloaded(_)), "got {err:?}");
+    assert!(
+        matches!(err.kind(), ErrorKind::Overloaded(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -452,8 +458,8 @@ fn maps_unknown_status_to_api_error() {
         .block_on(async { client.system_one("test", billing_question()).await })
         .unwrap_err();
 
-    match err {
-        TypeSafeError::Api { status, .. } => assert_eq!(status, 418),
+    match err.kind() {
+        ErrorKind::Api { status, .. } => assert_eq!(*status, 418),
         other => panic!("expected Api error, got {other:?}"),
     }
 }
@@ -472,7 +478,10 @@ fn connection_error_when_server_unreachable() {
         .unwrap_err();
 
     // Connection refused should map to Connection (retryable, but exhausted).
-    assert!(matches!(err, TypeSafeError::Connection(_)), "got {err:?}");
+    assert!(
+        matches!(err.kind(), ErrorKind::Connection(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -491,13 +500,11 @@ fn timeout_maps_to_timeout_error() {
         }
     });
 
-    let config = ClientConfig {
-        api_key: "test_key".to_string(),
-        base_url: format!("http://{addr}"),
-        default_model: "jev-latest".to_string(),
-        timeout: Duration::from_millis(100),
-        retry: RetryPolicy::new(0),
-    };
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_millis(100))
+        .with_retry(RetryPolicy::new(0));
     let client = TypeSafeClient::from_config(config).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -505,7 +512,7 @@ fn timeout_maps_to_timeout_error() {
         .block_on(async { client.system_one("test", billing_question()).await })
         .unwrap_err();
 
-    assert!(matches!(err, TypeSafeError::Timeout(_)), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::Timeout(_)), "got {err:?}");
 }
 
 #[test]
@@ -527,8 +534,8 @@ fn non_ascii_error_body_does_not_panic() {
         .unwrap_err();
 
     // Should not panic and should extract the message.
-    match err {
-        TypeSafeError::BadRequest(msg) => assert!(msg.contains("coût")),
+    match err.kind() {
+        ErrorKind::BadRequest(msg) => assert!(msg.contains("coût")),
         other => panic!("expected BadRequest with non-ASCII message, got {other:?}"),
     }
 }
@@ -588,13 +595,11 @@ fn sends_authorization_header() {
         ),
     );
 
-    let config = ClientConfig {
-        api_key: "my_secret_key".to_string(),
-        base_url: format!("http://{addr}"),
-        default_model: "jev-latest".to_string(),
-        timeout: Duration::from_secs(5),
-        retry: RetryPolicy::new(0),
-    };
+    let config = ClientConfig::new("my_secret_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
     let client = TypeSafeClient::from_config(config).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -623,13 +628,11 @@ fn sends_user_agent_header() {
         ),
     );
 
-    let config = ClientConfig {
-        api_key: "test_key".to_string(),
-        base_url: format!("http://{addr}"),
-        default_model: "jev-latest".to_string(),
-        timeout: Duration::from_secs(5),
-        retry: RetryPolicy::new(0),
-    };
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
     let client = TypeSafeClient::from_config(config).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -657,13 +660,11 @@ fn sends_accept_json_header() {
         ),
     );
 
-    let config = ClientConfig {
-        api_key: "test_key".to_string(),
-        base_url: format!("http://{addr}"),
-        default_model: "jev-latest".to_string(),
-        timeout: Duration::from_secs(5),
-        retry: RetryPolicy::new(0),
-    };
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
     let client = TypeSafeClient::from_config(config).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -700,7 +701,7 @@ fn rejects_empty_model_name() {
         .unwrap_err();
 
     assert!(
-        matches!(err, TypeSafeError::Validation(ref m) if m.contains("Model name")),
+        matches!(err.kind(), ErrorKind::Validation(ref m) if m.contains("Model name")),
         "got {err:?}"
     );
 }
@@ -728,7 +729,7 @@ fn rejects_empty_question_name() {
         .unwrap_err();
 
     assert!(
-        matches!(err, TypeSafeError::Validation(ref m) if m.contains("Question names")),
+        matches!(err.kind(), ErrorKind::Validation(ref m) if m.contains("Question names")),
         "got {err:?}"
     );
 }
@@ -755,13 +756,11 @@ fn truncated_body_is_not_retryable() {
         }
     });
 
-    let config = ClientConfig {
-        api_key: "test_key".to_string(),
-        base_url: format!("http://{addr}"),
-        default_model: "jev-latest".to_string(),
-        timeout: Duration::from_secs(5),
-        retry: RetryPolicy::new(2),
-    };
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(2));
     let client = TypeSafeClient::from_config(config).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -770,7 +769,7 @@ fn truncated_body_is_not_retryable() {
         .unwrap_err();
 
     // Body-read failures must be Transport (non-retryable), not Connection.
-    assert!(matches!(err, TypeSafeError::Transport(_)), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::Transport(_)), "got {err:?}");
     assert!(!err.is_retryable());
 }
 
@@ -795,13 +794,11 @@ fn response_body_timeout_is_not_retryable() {
         }
     });
 
-    let config = ClientConfig {
-        api_key: "test_key".to_string(),
-        base_url: format!("http://{addr}"),
-        default_model: "jev-latest".to_string(),
-        timeout: Duration::from_millis(200),
-        retry: RetryPolicy::new(2),
-    };
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_millis(200))
+        .with_retry(RetryPolicy::new(2));
     let client = TypeSafeClient::from_config(config).unwrap();
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -810,6 +807,313 @@ fn response_body_timeout_is_not_retryable() {
         .unwrap_err();
 
     // Body-read timeout must be Transport (non-retryable), not Timeout.
-    assert!(matches!(err, TypeSafeError::Transport(_)), "got {err:?}");
+    assert!(matches!(err.kind(), ErrorKind::Transport(_)), "got {err:?}");
     assert!(!err.is_retryable());
+}
+
+#[test]
+fn captures_request_id_from_response_header() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\nx-typesafe-request-id: req-abc-123\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap();
+
+    assert_eq!(result.request_id(), Some("req-abc-123"));
+}
+
+#[test]
+fn request_id_absent_when_header_missing() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap();
+
+    assert_eq!(result.request_id(), None);
+}
+
+#[test]
+fn captures_request_id_on_error() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        429,
+        "Too Many Requests",
+        "Content-Type: application/json\r\nx-typesafe-request-id: req-err-456\r\n",
+        r#"{"error":{"message":"slow down"}}"#,
+    )]);
+
+    // Use no retries so the first 429 is returned immediately.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(handle.url())
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::none());
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+
+    assert_eq!(err.request_id(), Some("req-err-456"));
+    assert!(matches!(err.kind(), ErrorKind::RateLimit(_)));
+}
+
+#[test]
+fn honors_retry_after_ms_header() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\nretry-after-ms: 500\r\n",
+            r#"{"error":{"message":"slow down"}}"#,
+        ),
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    ]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let start = Instant::now();
+    let result = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap();
+
+    // The retry-after-ms: 500 header should cause at least ~500ms of delay.
+    assert!(
+        start.elapsed() >= Duration::from_millis(400),
+        "expected >= 400ms delay, got {:?}",
+        start.elapsed()
+    );
+    assert_eq!(result.model, "jev-latest");
+}
+
+#[test]
+fn budget_stops_retry_before_exceeding_limit() {
+    let server = MockServer::new();
+    // Server always returns 429, so retries would normally continue.
+    let handle = server.serve(vec![
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"slow down"}}"#,
+        ),
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"slow down"}}"#,
+        ),
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"slow down"}}"#,
+        ),
+        http_response(
+            429,
+            "Too Many Requests",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"slow down"}}"#,
+        ),
+    ]);
+
+    // Set a very small budget (50ms) with large delays so the budget is
+    // exceeded on the first retry.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(handle.url())
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(
+            RetryPolicy::new(5)
+                .with_base_delay(Duration::from_secs(10))
+                .with_max_delay(Duration::from_secs(60))
+                .with_budget(Some(Duration::from_millis(50))),
+        );
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let start = Instant::now();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+
+    // Should stop quickly because the 10s delay exceeds the 50ms budget.
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "budget not enforced, took {:?}",
+        start.elapsed()
+    );
+    assert!(matches!(err.kind(), ErrorKind::RateLimit(_)), "got {err:?}");
+}
+
+#[test]
+fn extra_body_fields_are_sent_in_request() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (addr, captured) = capture_request_and_reply(
+        listener,
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    );
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_extra_body(serde_json::json!({"user_id": "u123", "priority": "high"}));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = rt
+        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
+        .unwrap();
+
+    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    // Extract the JSON body from the request
+    let body_start = request.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(&request[body_start..]).unwrap();
+    assert_eq!(body["user_id"], "u123");
+    assert_eq!(body["priority"], "high");
+    // Known fields should still be present
+    assert!(body.get("state").is_some());
+    assert!(body["questions"].is_object());
+    assert_eq!(body["model"], "jev-latest");
+}
+
+#[test]
+fn extra_body_does_not_override_known_fields() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (addr, captured) = capture_request_and_reply(
+        listener,
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    );
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    // Try to override "model" via extra_body — should be ignored.
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_extra_body(serde_json::json!({"model": "evil-model"}));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = rt
+        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
+        .unwrap();
+
+    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let body_start = request.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(&request[body_start..]).unwrap();
+    // The known field "model" should NOT be overridden by extra_body.
+    assert_eq!(body["model"], "jev-latest");
+}
+
+#[test]
+fn system_one_with_opts_overrides_model() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (addr, captured) = capture_request_and_reply(
+        listener,
+        http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        ),
+    );
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let opts = typesafeai_sdk::SystemOneOpts::new().with_model(Some("custom-model".to_string()));
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _ = rt
+        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
+        .unwrap();
+
+    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let body_start = request.find("\r\n\r\n").unwrap() + 4;
+    let body: serde_json::Value = serde_json::from_str(&request[body_start..]).unwrap();
+    assert_eq!(body["model"], "custom-model");
+}
+
+#[test]
+fn raw_body_is_captured_on_system_one_response() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap();
+
+    let raw = result.raw().expect("raw body should be captured");
+    assert_eq!(raw["model"], "jev-latest");
+    assert_eq!(raw["answers"]["billing"]["noul"], 0.95);
+}
+
+#[test]
+fn raw_body_is_captured_on_list_models_response() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &models_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async { client.list_models().await }).unwrap();
+
+    let raw = result.raw().expect("raw body should be captured");
+    assert_eq!(raw["models"][0]["name"], "jev-latest");
 }

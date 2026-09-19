@@ -1,6 +1,6 @@
 [package]
 name = "typesafeai-sdk"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -24,5 +24,13 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["time"] }
 
+[features]
+default = []
+blocking = ["tokio/rt"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[[test]]
+name = "blocking"
+required-features = ["blocking"]

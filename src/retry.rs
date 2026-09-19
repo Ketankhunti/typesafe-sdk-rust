@@ -18,7 +18,11 @@ pub fn jitter_seed() -> u64 {
 
 /// Retry configuration. Fields mirror the Python `RetryPolicy` and the
 /// JavaScript `RetryPolicy` defaults.
+///
+/// Start from [`RetryPolicy::default`] and adjust with the builder methods
+/// (or set the public fields directly).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// Maximum number of retry attempts after the initial request.
     pub max_retries: u32,
@@ -26,6 +30,10 @@ pub struct RetryPolicy {
     pub base_delay: Duration,
     /// Maximum delay between retries.
     pub max_delay: Duration,
+    /// Total budget for all retries including delays. `None` means no budget.
+    /// When set, the retry loop stops *before* a delay that would exceed it.
+    /// Default: 30 seconds, matching the Python SDK.
+    pub budget: Option<Duration>,
 }
 
 impl Default for RetryPolicy {
@@ -34,6 +42,7 @@ impl Default for RetryPolicy {
             max_retries: 2,
             base_delay: Duration::from_millis(500),
             max_delay: Duration::from_secs(10),
+            budget: Some(Duration::from_secs(30)),
         }
     }
 }
@@ -43,6 +52,14 @@ impl RetryPolicy {
     pub fn new(max_retries: u32) -> Self {
         Self {
             max_retries,
+            ..Default::default()
+        }
+    }
+
+    /// Create a retry policy that never retries (max_retries = 0).
+    pub fn none() -> Self {
+        Self {
+            max_retries: 0,
             ..Default::default()
         }
     }
@@ -58,6 +75,14 @@ impl RetryPolicy {
     #[must_use = "the returned RetryPolicy should be used"]
     pub fn with_max_delay(mut self, delay: Duration) -> Self {
         self.max_delay = delay;
+        self
+    }
+
+    /// Set the total retry budget. `None` disables the budget (unlimited).
+    /// When set, the retry loop stops *before* a delay that would exceed it.
+    #[must_use = "the returned RetryPolicy should be used"]
+    pub fn with_budget(mut self, budget: Option<Duration>) -> Self {
+        self.budget = budget;
         self
     }
 
@@ -117,6 +142,17 @@ impl RetryPolicy {
         }
         let own = self.delay_for(attempt);
         Some(if retry_after > own { retry_after } else { own })
+    }
+
+    /// Returns `true` if the retry loop should stop before sleeping for
+    /// `delay`, because `elapsed + delay` would exceed the budget.
+    ///
+    /// If no budget is set (`None`), always returns `false`.
+    pub fn budget_exceeded(&self, elapsed: Duration, delay: Duration) -> bool {
+        match self.budget {
+            Some(budget) => elapsed + delay >= budget,
+            None => false,
+        }
     }
 }
 
@@ -192,5 +228,37 @@ mod tests {
         // The exponential backoff (500ms * 2^5 = 16000ms) should be well
         // under the enormous cap, so the delay equals the raw backoff.
         assert_eq!(delay, Duration::from_millis(16000));
+    }
+
+    #[test]
+    fn budget_exceeded_when_elapsed_plus_delay_exceeds_budget() {
+        let policy = RetryPolicy::default().with_budget(Some(Duration::from_secs(10)));
+        // elapsed=8s, delay=3s → 11s > 10s budget → exceeded
+        assert!(policy.budget_exceeded(Duration::from_secs(8), Duration::from_secs(3)));
+        // elapsed=7s, delay=3s → 10s == 10s budget → exceeded (>=)
+        assert!(policy.budget_exceeded(Duration::from_secs(7), Duration::from_secs(3)));
+        // elapsed=6s, delay=3s → 9s < 10s budget → not exceeded
+        assert!(!policy.budget_exceeded(Duration::from_secs(6), Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn budget_none_never_exceeded() {
+        let policy = RetryPolicy::default().with_budget(None);
+        assert!(!policy.budget_exceeded(Duration::from_secs(999), Duration::from_secs(999)));
+    }
+
+    #[test]
+    fn with_budget_builder_sets_field() {
+        let policy = RetryPolicy::default().with_budget(Some(Duration::from_secs(60)));
+        assert_eq!(policy.budget, Some(Duration::from_secs(60)));
+
+        let policy = RetryPolicy::default().with_budget(None);
+        assert_eq!(policy.budget, None);
+    }
+
+    #[test]
+    fn none_policy_has_zero_retries() {
+        let policy = RetryPolicy::none();
+        assert_eq!(policy.max_retries, 0);
     }
 }

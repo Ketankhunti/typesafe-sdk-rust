@@ -21,6 +21,7 @@ use crate::questions::Question;
 /// - `model` — the model name or alias (e.g. `"jev-latest"`).
 /// - `questions` — non-empty map of question names to question objects.
 #[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct SystemOneRequest {
     /// Text, a JSON object, or an array to evaluate.
     pub state: Value,
@@ -28,6 +29,12 @@ pub struct SystemOneRequest {
     pub model: String,
     /// Non-empty map of question names to question objects.
     pub questions: HashMap<String, Question>,
+    /// Extra fields to merge into the request body for forward compatibility.
+    /// These are serialized at the top level alongside `state`, `model`,
+    /// and `questions`. If a key collides with a known field, the known
+    /// field takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -36,6 +43,7 @@ pub struct SystemOneRequest {
 
 /// Token usage for a request.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct Usage {
     /// Number of input tokens consumed.
     pub input_tokens: u64,
@@ -45,6 +53,7 @@ pub struct Usage {
 
 /// A yes/no answer.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct NoulAnswer {
     /// Probability of a "yes" answer, from 0 to 1.
     pub noul: f64,
@@ -52,6 +61,7 @@ pub struct NoulAnswer {
 
 /// A choice answer.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct ChoiceAnswer {
     /// The selected label.
     pub choice: String,
@@ -63,6 +73,7 @@ pub struct ChoiceAnswer {
 
 /// A score answer.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct ScoreAnswer {
     /// The assigned score (0-indexed). Returned as a float by the API
     /// (e.g. `0.0`); cast to `u32` if you need an integer index.
@@ -78,6 +89,7 @@ pub struct ScoreAnswer {
 /// An answer to a single question, identified by its `type` field.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum Answer {
     /// A yes/no answer.
     #[serde(rename = "noul")]
@@ -146,6 +158,7 @@ impl Answer {
 /// [`SystemOneResponse::choices`], and [`SystemOneResponse::scores`] helper
 /// methods, mirroring the Python SDK's grouped accessors.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct SystemOneResponse {
     /// The model used to answer the request.
     pub model: String,
@@ -153,6 +166,14 @@ pub struct SystemOneResponse {
     pub answers: HashMap<String, Answer>,
     /// Token usage for the request.
     pub usage: Usage,
+    /// The request ID returned by the server (from the
+    /// `x-typesafe-request-id` response header), if present.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// The raw JSON body of the response, injected after deserialization.
+    /// Useful for accessing fields the SDK doesn't yet model.
+    #[serde(skip)]
+    pub raw: Option<Value>,
 }
 
 impl SystemOneResponse {
@@ -194,6 +215,19 @@ impl SystemOneResponse {
     pub fn score(&self, name: &str) -> Option<&ScoreAnswer> {
         self.answers.get(name).and_then(|a| a.as_score())
     }
+
+    /// Returns the request ID associated with this response, if the server
+    /// provided one via the `x-typesafe-request-id` header.
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    /// Returns the raw JSON body of the response as a [`serde_json::Value`],
+    /// if it was captured. This gives access to fields the SDK doesn't yet
+    /// model.
+    pub fn raw(&self) -> Option<&Value> {
+        self.raw.as_ref()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +236,7 @@ impl SystemOneResponse {
 
 /// Metadata for an available model.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct ModelCard {
     /// The model name or alias.
     pub name: String,
@@ -214,9 +249,81 @@ pub struct ModelCard {
 
 /// The response from `GET /v1/models`.
 #[derive(Debug, Clone, Deserialize)]
+#[non_exhaustive]
 pub struct ListModelsResponse {
     /// List of available models.
     pub models: Vec<ModelCard>,
+    /// The request ID returned by the server (from the
+    /// `x-typesafe-request-id` response header), if present.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// The raw JSON body of the response, injected after deserialization.
+    #[serde(skip)]
+    pub raw: Option<Value>,
+}
+
+impl ListModelsResponse {
+    /// Returns the request ID associated with this response, if the server
+    /// provided one via the `x-typesafe-request-id` header.
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    /// Returns the raw JSON body of the response as a [`serde_json::Value`],
+    /// if it was captured.
+    pub fn raw(&self) -> Option<&Value> {
+        self.raw.as_ref()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SetRequestId trait
+// ---------------------------------------------------------------------------
+
+/// Trait for response types that can carry a request ID captured from the
+/// `x-typesafe-request-id` response header.
+///
+/// Implemented by [`SystemOneResponse`] and [`ListModelsResponse`]. The
+/// client calls [`set_request_id`](Self::set_request_id) after deserializing
+/// the response body, injecting the header value so callers can correlate
+/// requests with server-side logs.
+pub trait SetRequestId {
+    /// Set the request ID on this response.
+    fn set_request_id(&mut self, request_id: Option<String>);
+}
+
+/// Trait for response types that can carry the raw JSON body.
+///
+/// Implemented by [`SystemOneResponse`] and [`ListModelsResponse`]. The
+/// client calls [`set_raw`](Self::set_raw) after deserializing, injecting
+/// the raw JSON so callers can access fields the SDK doesn't yet model.
+pub trait SetRawBody {
+    /// Set the raw JSON body on this response.
+    fn set_raw(&mut self, raw: Option<Value>);
+}
+
+impl SetRequestId for SystemOneResponse {
+    fn set_request_id(&mut self, request_id: Option<String>) {
+        self.request_id = request_id;
+    }
+}
+
+impl SetRawBody for SystemOneResponse {
+    fn set_raw(&mut self, raw: Option<Value>) {
+        self.raw = raw;
+    }
+}
+
+impl SetRequestId for ListModelsResponse {
+    fn set_request_id(&mut self, request_id: Option<String>) {
+        self.request_id = request_id;
+    }
+}
+
+impl SetRawBody for ListModelsResponse {
+    fn set_raw(&mut self, raw: Option<Value>) {
+        self.raw = raw;
+    }
 }
 
 #[cfg(test)]

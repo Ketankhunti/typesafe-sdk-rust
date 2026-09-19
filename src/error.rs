@@ -1,17 +1,20 @@
 //! Error types for the TypeSafe SDK.
 //!
 //! Mirrors the error hierarchy in the Python and JavaScript SDKs:
-//! a root [`TypeSafeError`] enum with variants for authentication, rate
-//! limits, bad requests, connection failures, timeouts, and response
-//! validation.
+//! a root [`TypeSafeError`] struct wrapping an [`ErrorKind`] enum, with an
+//! optional request ID for correlating with server-side logs.
 
 use std::time::Duration;
 
 use thiserror::Error;
 
-/// The root error type returned by all SDK operations.
+/// The specific kind of error that occurred.
+///
+/// This is the inner classification extracted from [`TypeSafeError`]. Match
+/// on `err.kind()` to handle specific error categories.
 #[derive(Debug, Error)]
-pub enum TypeSafeError {
+#[non_exhaustive]
+pub enum ErrorKind {
     /// `401 Unauthorized` — missing or invalid API key.
     #[error("authentication failed: {0}")]
     Authentication(String),
@@ -58,8 +61,14 @@ pub enum TypeSafeError {
     Timeout(Duration),
 
     /// The response body did not match the expected schema.
-    #[error("response validation error: {0}")]
-    ResponseValidation(String),
+    #[error("response validation error: {message}{}", field_path.as_ref().map(|p| format!(" (field: {p})")).unwrap_or_default())]
+    ResponseValidation {
+        /// The human-readable error message.
+        message: String,
+        /// The JSON path to the field that failed validation (e.g.
+        /// `answers.billing.noul`), if known.
+        field_path: Option<String>,
+    },
 
     /// A local validation error before the request was sent
     /// (e.g. empty questions or a score with fewer than two criteria).
@@ -75,7 +84,7 @@ pub enum TypeSafeError {
     Transport(#[from] reqwest::Error),
 }
 
-impl TypeSafeError {
+impl ErrorKind {
     /// Returns `true` if this error is retryable (rate limit, overload,
     /// server error, connection failure, or timeout).
     ///
@@ -85,14 +94,150 @@ impl TypeSafeError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            TypeSafeError::RateLimit(_)
-                | TypeSafeError::Overloaded(_)
-                | TypeSafeError::InternalServer(_)
-                | TypeSafeError::Connection(_)
-                | TypeSafeError::Timeout(_)
+            ErrorKind::RateLimit(_)
+                | ErrorKind::Overloaded(_)
+                | ErrorKind::InternalServer(_)
+                | ErrorKind::Connection(_)
+                | ErrorKind::Timeout(_)
         )
+    }
+}
+
+/// The root error type returned by all SDK operations.
+///
+/// Wraps an [`ErrorKind`] with an optional request ID (from the
+/// `x-typesafe-request-id` response header) for correlating errors with
+/// server-side logs.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct TypeSafeError {
+    kind: ErrorKind,
+    request_id: Option<String>,
+}
+
+impl TypeSafeError {
+    /// Create a new error from a kind, with no request ID.
+    pub fn new(kind: ErrorKind) -> Self {
+        Self {
+            kind,
+            request_id: None,
+        }
+    }
+
+    /// Create a new error from a kind and an optional request ID.
+    pub fn with_request_id(kind: ErrorKind, request_id: Option<String>) -> Self {
+        Self { kind, request_id }
+    }
+
+    /// Returns the specific error kind.
+    pub fn kind(&self) -> &ErrorKind {
+        &self.kind
+    }
+
+    /// Returns the request ID associated with this error, if the server
+    /// provided one via the `x-typesafe-request-id` header.
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
+    /// Returns `true` if this error is retryable. Delegates to
+    /// [`ErrorKind::is_retryable`].
+    pub fn is_retryable(&self) -> bool {
+        self.kind.is_retryable()
+    }
+}
+
+impl std::fmt::Display for TypeSafeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.kind)?;
+        if let Some(ref id) = self.request_id {
+            write!(f, " (request id: {id})")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for TypeSafeError {}
+
+impl From<serde_json::Error> for TypeSafeError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::new(ErrorKind::Json(e))
+    }
+}
+
+impl From<reqwest::Error> for TypeSafeError {
+    fn from(e: reqwest::Error) -> Self {
+        Self::new(ErrorKind::Transport(e))
+    }
+}
+
+impl From<ErrorKind> for TypeSafeError {
+    fn from(kind: ErrorKind) -> Self {
+        Self::new(kind)
     }
 }
 
 /// A convenience `Result` alias used throughout the SDK.
 pub type Result<T> = std::result::Result<T, TypeSafeError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn response_validation_with_field_path() {
+        let err = TypeSafeError::new(ErrorKind::ResponseValidation {
+            message: "expected a number".to_string(),
+            field_path: Some("answers.billing.noul".to_string()),
+        });
+        let display = format!("{err}");
+        assert!(display.contains("expected a number"));
+        assert!(display.contains("answers.billing.noul"));
+    }
+
+    #[test]
+    fn response_validation_without_field_path() {
+        let err = TypeSafeError::new(ErrorKind::ResponseValidation {
+            message: "malformed JSON".to_string(),
+            field_path: None,
+        });
+        let display = format!("{err}");
+        assert!(display.contains("malformed JSON"));
+        assert!(!display.contains("field:"));
+    }
+
+    #[test]
+    fn response_validation_is_not_retryable() {
+        let kind = ErrorKind::ResponseValidation {
+            message: "bad".to_string(),
+            field_path: None,
+        };
+        assert!(!kind.is_retryable());
+    }
+
+    #[test]
+    fn request_id_displayed_when_present() {
+        let err = TypeSafeError::with_request_id(
+            ErrorKind::Authentication("bad key".to_string()),
+            Some("req-123".to_string()),
+        );
+        let display = format!("{err}");
+        assert!(display.contains("bad key"));
+        assert!(display.contains("req-123"));
+    }
+
+    #[test]
+    fn request_id_absent_when_not_provided() {
+        let err = TypeSafeError::new(ErrorKind::Authentication("bad key".to_string()));
+        let display = format!("{err}");
+        assert!(display.contains("bad key"));
+        assert!(!display.contains("request id"));
+    }
+
+    #[test]
+    fn from_error_kind_creates_error() {
+        let kind = ErrorKind::Validation("test".to_string());
+        let err: TypeSafeError = kind.into();
+        assert!(matches!(err.kind(), ErrorKind::Validation(_)));
+    }
+}

@@ -32,6 +32,7 @@ pub type Description = Option<Value>;
 /// Optional descriptions for the `true` and `false` outcomes of a [`Noul`]
 /// question.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct NoulCriteria {
     /// Description of the "yes" outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -48,6 +49,7 @@ pub struct NoulCriteria {
 /// The `"type"` tag is added by the [`Question`] enum's `#[serde(tag = "type")]`
 /// attribute; this struct only carries `instructions` and `criteria`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Noul {
     /// The question as text, a JSON object, or an array. May be `null`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -88,6 +90,7 @@ impl Noul {
 /// Wire format:
 /// `{"type":"choice","instructions":"...","criteria":{"label":"desc",...}}`
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Choice {
     /// The question as text, a JSON object, or an array. May be `null`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +121,7 @@ impl Choice {
 /// Wire format:
 /// `{"type":"score","instructions":"...","criteria":["desc0","desc1",...]}`
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Score {
     /// The question as text, a JSON object, or an array. May be `null`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,6 +152,7 @@ impl Score {
 /// This enum is used as the value type in the `questions` map sent to the API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum Question {
     /// A yes/no question.
     #[serde(rename = "noul")]
@@ -238,32 +243,38 @@ pub(crate) fn validate_questions(
     questions: &HashMap<String, Question>,
 ) -> crate::error::Result<()> {
     if questions.is_empty() {
-        return Err(crate::error::TypeSafeError::Validation(
-            "At least one question is required.".to_string(),
+        return Err(crate::error::TypeSafeError::new(
+            crate::error::ErrorKind::Validation("At least one question is required.".to_string()),
         ));
     }
 
     for (name, question) in questions {
         if name.trim().is_empty() {
-            return Err(crate::error::TypeSafeError::Validation(
-                "Question names cannot be empty or whitespace.".to_string(),
+            return Err(crate::error::TypeSafeError::new(
+                crate::error::ErrorKind::Validation(
+                    "Question names cannot be empty or whitespace.".to_string(),
+                ),
             ));
         }
         match question {
             Question::Choice(choice) => {
                 if choice.criteria.len() < 2 {
-                    return Err(crate::error::TypeSafeError::Validation(format!(
-                        "Choice question \"{name}\" has {} criteria; at least two choices are required.",
-                        choice.criteria.len()
-                    )));
+                    return Err(crate::error::TypeSafeError::new(
+                        crate::error::ErrorKind::Validation(format!(
+                            "Choice question \"{name}\" has {} criteria; at least two choices are required.",
+                            choice.criteria.len()
+                        )),
+                    ));
                 }
             }
             Question::Score(score) => {
                 if score.criteria.len() < 2 {
-                    return Err(crate::error::TypeSafeError::Validation(format!(
-                        "Score question \"{name}\" has {} criteria; at least two scores are required.",
-                        score.criteria.len()
-                    )));
+                    return Err(crate::error::TypeSafeError::new(
+                        crate::error::ErrorKind::Validation(format!(
+                            "Score question \"{name}\" has {} criteria; at least two scores are required.",
+                            score.criteria.len()
+                        )),
+                    ));
                 }
             }
             Question::Noul(_) => {}

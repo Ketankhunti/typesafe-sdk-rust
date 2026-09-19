@@ -41,10 +41,12 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION,
 use reqwest::{Client as HttpClient, Method, StatusCode};
 use serde_json::Value;
 
-use crate::error::{Result, TypeSafeError};
+use crate::error::{ErrorKind, Result, TypeSafeError};
 use crate::questions::{validate_questions, Question};
 use crate::retry::{jitter_seed, RetryPolicy};
-use crate::types::{ListModelsResponse, SystemOneRequest, SystemOneResponse};
+use crate::types::{
+    ListModelsResponse, SetRawBody, SetRequestId, SystemOneRequest, SystemOneResponse,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-latest";
@@ -52,6 +54,8 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const SDK_USER_AGENT: &str = concat!("typesafe-sdk/", env!("CARGO_PKG_VERSION"));
 const SYSTEM_ONE_PATH: &str = "/v1/systemone";
 const MODELS_PATH: &str = "/v1/models";
+const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
+const REQUEST_ID_HEADER: &str = "x-typesafe-request-id";
 /// Maximum number of characters of a response body echoed into an error.
 const MAX_ERROR_BODY_CHARS: usize = 512;
 
@@ -60,6 +64,7 @@ const MAX_ERROR_BODY_CHARS: usize = 512;
 /// All fields are public for construction, but prefer [`ClientConfig::default`]
 /// or the builder methods on [`RetryPolicy`] for common cases.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ClientConfig {
     /// API key for authentication.
     ///
@@ -92,6 +97,55 @@ impl Default for ClientConfig {
     }
 }
 
+impl ClientConfig {
+    /// Create a new `ClientConfig` with the given API key and all other
+    /// fields set to their defaults.
+    ///
+    /// Use the `.with_*()` methods to override individual fields.
+    #[must_use]
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            api_key: api_key.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Set the API key.
+    #[must_use]
+    pub fn with_api_key(mut self, api_key: impl Into<String>) -> Self {
+        self.api_key = api_key.into();
+        self
+    }
+
+    /// Set the base URL.
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into();
+        self
+    }
+
+    /// Set the default model.
+    #[must_use]
+    pub fn with_default_model(mut self, default_model: impl Into<String>) -> Self {
+        self.default_model = default_model.into();
+        self
+    }
+
+    /// Set the per-attempt timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Set the retry policy.
+    #[must_use]
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
+    }
+}
+
 impl fmt::Debug for ClientConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClientConfig")
@@ -109,6 +163,7 @@ impl fmt::Debug for ClientConfig {
 /// Construct with [`TypeSafeClient::new`] or [`TypeSafeClient::from_env`].
 /// Cloning is cheap and shares the underlying connection pool.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct TypeSafeClient {
     config: ClientConfig,
     http: HttpClient,
@@ -139,6 +194,61 @@ impl From<TypeSafeError> for Failure {
     }
 }
 
+/// Per-call options for [`TypeSafeClient::system_one_with_opts`].
+///
+/// Built with a builder pattern. Start with [`SystemOneOpts::new`] and chain
+/// `.with_*()` methods. Fields not set use the client's defaults.
+///
+/// # Example
+/// ```no_run
+/// use typesafeai_sdk::SystemOneOpts;
+///
+/// let opts = SystemOneOpts::new()
+///     .with_model(Some("jev-latest".to_string()))
+///     .with_state("I was charged twice.")
+///     .with_extra_body(serde_json::json!({"priority": "high"}));
+/// ```
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SystemOneOpts {
+    /// Override the client's default model for this call.
+    pub(crate) model: Option<String>,
+    /// The state to evaluate. If not set, defaults to `null`.
+    pub(crate) state: Option<Value>,
+    /// Extra fields to merge into the request body for forward compatibility.
+    pub(crate) extra_body: Option<Value>,
+}
+
+impl SystemOneOpts {
+    /// Create a new empty options set (all fields use client defaults).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Override the model for this call. `None` uses the client default.
+    #[must_use = "the returned SystemOneOpts should be used"]
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Set the state to evaluate. Accepts a string, JSON object, or array.
+    #[must_use = "the returned SystemOneOpts should be used"]
+    pub fn with_state(mut self, state: impl Into<Value>) -> Self {
+        self.state = Some(state.into());
+        self
+    }
+
+    /// Set extra fields to merge into the request body for forward
+    /// compatibility. Keys that collide with known fields (`state`, `model`,
+    /// `questions`) are ignored — the known fields take precedence.
+    #[must_use = "the returned SystemOneOpts should be used"]
+    pub fn with_extra_body(mut self, extra: Value) -> Self {
+        self.extra_body = Some(extra);
+        self
+    }
+}
+
 impl TypeSafeClient {
     /// Create a new client with the given API key and default settings.
     #[must_use = "the returned client should be used to make API calls"]
@@ -158,10 +268,10 @@ impl TypeSafeClient {
         config.api_key = config.api_key.trim().to_string();
 
         if config.api_key.is_empty() {
-            return Err(TypeSafeError::Validation(
+            return Err(TypeSafeError::new(ErrorKind::Validation(
                 "No API key was provided. Pass an API key to `TypeSafeClient::new` or set the `TYPESAFE_API_KEY` environment variable."
                     .to_string(),
-            ));
+            )));
         }
 
         // Normalize the base URL: trim trailing slash and validate scheme/host.
@@ -170,19 +280,19 @@ impl TypeSafeClient {
 
         // Validate the default model name.
         if config.default_model.trim().is_empty() {
-            return Err(TypeSafeError::Validation(
+            return Err(TypeSafeError::new(ErrorKind::Validation(
                 "Default model name cannot be empty.".to_string(),
-            ));
+            )));
         }
 
         // Build the auth header once. Marking it sensitive keeps the key out
         // of reqwest's debug output.
         let mut auth =
             HeaderValue::from_str(&format!("Bearer {}", config.api_key)).map_err(|_| {
-                TypeSafeError::Validation(
+                TypeSafeError::new(ErrorKind::Validation(
                     "The API key contains characters that are not valid in an HTTP header."
                         .to_string(),
-                )
+                ))
             })?;
         auth.set_sensitive(true);
 
@@ -199,7 +309,7 @@ impl TypeSafeClient {
             .user_agent(SDK_USER_AGENT)
             .default_headers(headers)
             .build()
-            .map_err(TypeSafeError::Transport)?;
+            .map_err(|e| TypeSafeError::new(ErrorKind::Transport(e)))?;
 
         Ok(Self { config, http })
     }
@@ -295,22 +405,74 @@ impl TypeSafeClient {
         questions: HashMap<String, Question>,
         model: Option<&str>,
     ) -> Result<SystemOneResponse> {
+        let opts = SystemOneOpts::new()
+            .with_model(model.map(|m| m.to_string()))
+            .with_state(state);
+        self.system_one_with_opts(questions, opts).await
+    }
+
+    /// Like [`system_one`](Self::system_one) but with full per-call options
+    /// via a [`SystemOneOpts`] builder.
+    ///
+    /// This allows overriding the model, adding extra body fields for
+    /// forward compatibility, and attaching custom headers — all per-call.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use typesafeai_sdk::{TypeSafeClient, noul, SystemOneOpts};
+    /// use std::collections::HashMap;
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = TypeSafeClient::from_env()?;
+    /// let mut questions = HashMap::new();
+    /// questions.insert("billing".to_string(), noul("Is this about billing?").into());
+    ///
+    /// let opts = SystemOneOpts::new()
+    ///     .with_model(Some("jev-latest".to_string()))
+    ///     .with_extra_body(serde_json::json!({"user_id": "u123"}));
+    ///
+    /// let response = client.system_one_with_opts(questions, opts).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn system_one_with_opts(
+        &self,
+        questions: HashMap<String, Question>,
+        opts: SystemOneOpts,
+    ) -> Result<SystemOneResponse> {
         validate_questions(&questions)?;
 
-        let model_name = model.unwrap_or(&self.config.default_model);
+        let model_name = opts
+            .model
+            .unwrap_or_else(|| self.config.default_model.clone());
         if model_name.trim().is_empty() {
-            return Err(TypeSafeError::Validation(
+            return Err(TypeSafeError::new(ErrorKind::Validation(
                 "Model name cannot be empty.".to_string(),
-            ));
+            )));
         }
 
         let request = SystemOneRequest {
-            state: state.into(),
-            model: model_name.to_string(),
+            state: opts.state.unwrap_or(Value::Null),
+            model: model_name,
             questions,
+            extra_body: opts.extra_body,
         };
 
-        let body = serde_json::to_value(&request)?;
+        let mut body = serde_json::to_value(&request)?;
+
+        // Merge extra_body fields at the top level for forward compatibility.
+        // Known fields (state, model, questions) take precedence over
+        // extra_body keys.
+        if let Some(extra) = &request.extra_body {
+            if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extra.as_object()) {
+                for (k, v) in extra_obj {
+                    if !obj.contains_key(k) {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
 
         self.request_with_retry(Method::POST, SYSTEM_ONE_PATH, Some(body))
             .await
@@ -330,7 +492,7 @@ impl TypeSafeClient {
     // Internal HTTP + retry
     // -----------------------------------------------------------------------
 
-    async fn request_with_retry<T: serde::de::DeserializeOwned>(
+    async fn request_with_retry<T: serde::de::DeserializeOwned + 'static>(
         &self,
         method: Method,
         path: &str,
@@ -339,6 +501,7 @@ impl TypeSafeClient {
         let url = format!("{}{}", self.config.base_url, path);
         let retry = &self.config.retry;
 
+        let started = std::time::Instant::now();
         let mut attempt = 0;
         loop {
             match self.attempt_request(&method, &url, body.as_ref()).await {
@@ -359,6 +522,11 @@ impl TypeSafeClient {
                         None => retry.delay_for_with_jitter(attempt, jitter_seed()),
                     };
 
+                    // Stop before a delay that would exceed the budget.
+                    if retry.budget_exceeded(started.elapsed(), delay) {
+                        return Err(failure.error);
+                    }
+
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                 }
@@ -366,7 +534,7 @@ impl TypeSafeClient {
         }
     }
 
-    async fn attempt_request<T: serde::de::DeserializeOwned>(
+    async fn attempt_request<T: serde::de::DeserializeOwned + 'static>(
         &self,
         method: &Method,
         url: &str,
@@ -387,48 +555,72 @@ impl TypeSafeClient {
         self.parse_response(response).await
     }
 
-    async fn parse_response<T: serde::de::DeserializeOwned>(
+    async fn parse_response<T: serde::de::DeserializeOwned + 'static>(
         &self,
         response: reqwest::Response,
     ) -> std::result::Result<T, Failure> {
         let status = response.status();
-        let retry_after = response
-            .headers()
-            .get(RETRY_AFTER)
+        let headers = response.headers();
+        // Capture the request ID for both success and error paths.
+        let request_id = headers
+            .get(REQUEST_ID_HEADER)
             .and_then(|v| v.to_str().ok())
-            .and_then(parse_retry_after);
+            .map(|s| s.to_string());
+        // Prefer retry-after-ms (milliseconds, more precise) over the
+        // standard Retry-After (seconds). Either may be absent.
+        let retry_after = headers
+            .get(RETRY_AFTER_MS_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_retry_after_ms)
+            .or_else(|| {
+                headers
+                    .get(RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_retry_after)
+            });
 
         let text = response.text().await.map_err(map_body_error)?;
 
         if status.is_success() {
-            return serde_json::from_str(&text).map_err(|e| {
-                Failure::from(TypeSafeError::ResponseValidation(format!(
-                    "Failed to parse response body: {e}\nBody: {}",
-                    truncate(&text, MAX_ERROR_BODY_CHARS)
-                )))
-            });
+            let mut result: T = serde_json::from_str(&text).map_err(|e| {
+                Failure::from(TypeSafeError::new(ErrorKind::ResponseValidation {
+                    message: format!(
+                        "Failed to parse response body: {e}\nBody: {}",
+                        truncate(&text, MAX_ERROR_BODY_CHARS)
+                    ),
+                    field_path: None,
+                }))
+            })?;
+            // Inject the request ID and raw body into the response type.
+            // This is a no-op for types that don't implement the traits.
+            let raw = serde_json::from_str::<Value>(&text).ok();
+            inject_metadata(&mut result, request_id.clone(), raw);
+            return Ok(result);
         }
 
         // Map HTTP status codes to typed errors, mirroring the Python/JS SDKs.
         let message = Self::extract_error_message(&text)
             .unwrap_or_else(|| truncate(&text, MAX_ERROR_BODY_CHARS));
-        let error = match status {
-            StatusCode::UNAUTHORIZED => TypeSafeError::Authentication(message),
-            StatusCode::BAD_REQUEST => TypeSafeError::BadRequest(message),
-            StatusCode::NOT_FOUND => TypeSafeError::NotFound(message),
-            StatusCode::UNPROCESSABLE_ENTITY => TypeSafeError::UnprocessableEntity(message),
-            StatusCode::TOO_MANY_REQUESTS => TypeSafeError::RateLimit(message),
+        let kind = match status {
+            StatusCode::UNAUTHORIZED => ErrorKind::Authentication(message),
+            StatusCode::BAD_REQUEST => ErrorKind::BadRequest(message),
+            StatusCode::NOT_FOUND => ErrorKind::NotFound(message),
+            StatusCode::UNPROCESSABLE_ENTITY => ErrorKind::UnprocessableEntity(message),
+            StatusCode::TOO_MANY_REQUESTS => ErrorKind::RateLimit(message),
             StatusCode::INTERNAL_SERVER_ERROR
             | StatusCode::BAD_GATEWAY
             | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT => TypeSafeError::InternalServer(message),
-            s if s.as_u16() == 529 => TypeSafeError::Overloaded(message),
-            _ => TypeSafeError::Api {
+            | StatusCode::GATEWAY_TIMEOUT => ErrorKind::InternalServer(message),
+            s if s.as_u16() == 529 => ErrorKind::Overloaded(message),
+            _ => ErrorKind::Api {
                 status: status.as_u16(),
                 message,
             },
         };
-        Err(Failure { error, retry_after })
+        Err(Failure {
+            error: TypeSafeError::with_request_id(kind, request_id),
+            retry_after,
+        })
     }
 
     /// Try to extract a human-readable error message from the response body.
@@ -459,6 +651,23 @@ impl TypeSafeClient {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Inject the request ID and raw JSON body into a response type if it
+/// implements [`SetRequestId`](crate::types::SetRequestId) and/or
+/// [`SetRawBody`](crate::types::SetRawBody).
+///
+/// Uses runtime type checking via `Any` so the generic `parse_response`
+/// can stay monomorphic without requiring all `T` to implement the traits.
+fn inject_metadata<T: 'static>(value: &mut T, request_id: Option<String>, raw: Option<Value>) {
+    use std::any::Any;
+    if let Some(resp) = (value as &mut dyn Any).downcast_mut::<SystemOneResponse>() {
+        resp.set_request_id(request_id);
+        resp.set_raw(raw);
+    } else if let Some(resp) = (value as &mut dyn Any).downcast_mut::<ListModelsResponse>() {
+        resp.set_request_id(request_id);
+        resp.set_raw(raw);
+    }
+}
+
 /// Map a `reqwest` error to the appropriate `TypeSafeError` variant.
 ///
 /// - timeouts -> [`TypeSafeError::Timeout`], reporting the *configured* timeout
@@ -477,11 +686,11 @@ impl TypeSafeClient {
 /// Only `is_connect()` (pre-request network failure) is retryable.
 fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> TypeSafeError {
     if e.is_timeout() {
-        TypeSafeError::Timeout(timeout)
+        TypeSafeError::new(ErrorKind::Timeout(timeout))
     } else if e.is_connect() {
-        TypeSafeError::Connection(e.to_string())
+        TypeSafeError::new(ErrorKind::Connection(e.to_string()))
     } else {
-        TypeSafeError::Transport(e)
+        TypeSafeError::new(ErrorKind::Transport(e))
     }
 }
 
@@ -492,7 +701,7 @@ fn map_reqwest_error(e: reqwest::Error, timeout: Duration) -> TypeSafeError {
 /// connection reset — must be non-retryable to avoid replaying a POST whose
 /// side effects the server may have already applied.
 fn map_body_error(e: reqwest::Error) -> TypeSafeError {
-    TypeSafeError::Transport(e)
+    TypeSafeError::new(ErrorKind::Transport(e))
 }
 
 /// Parse a `Retry-After` header value given in seconds.
@@ -501,6 +710,15 @@ fn map_body_error(e: reqwest::Error) -> TypeSafeError {
 /// return `None`, and the SDK falls back to its own backoff.
 fn parse_retry_after(value: &str) -> Option<Duration> {
     value.trim().parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Parse a `retry-after-ms` header value given in milliseconds.
+///
+/// This is a non-standard header used by some API gateways to express
+/// sub-second retry delays with more precision than the standard
+/// `Retry-After` (seconds) header.
+fn parse_retry_after_ms(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_millis)
 }
 
 /// Truncate a string to at most `max_chars` *characters*, appending "..." if
@@ -518,8 +736,11 @@ fn truncate(s: &str, max_chars: usize) -> String {
 /// look-alikes such as `http://localhost.evil.example` or
 /// `http://localhost@evil.example` are rejected.
 fn validate_base_url(raw: &str) -> Result<()> {
-    let url = reqwest::Url::parse(raw)
-        .map_err(|e| TypeSafeError::Validation(format!("Base URL is not a valid URL: {e}")))?;
+    let url = reqwest::Url::parse(raw).map_err(|e| {
+        TypeSafeError::new(ErrorKind::Validation(format!(
+            "Base URL is not a valid URL: {e}"
+        )))
+    })?;
 
     // Reject credentials, query parameters, and fragments — a base URL
     // should be a bare origin + optional path.
@@ -528,17 +749,17 @@ fn validate_base_url(raw: &str) -> Result<()> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(TypeSafeError::Validation(
+        return Err(TypeSafeError::new(ErrorKind::Validation(
             "Base URL must not contain credentials, query parameters, or fragments.".to_string(),
-        ));
+        )));
     }
 
     match (url.scheme(), url.host_str()) {
         ("https", Some(_)) => Ok(()),
         ("http", Some("localhost" | "127.0.0.1" | "::1" | "[::1]")) => Ok(()),
-        (scheme, _) => Err(TypeSafeError::Validation(format!(
+        (scheme, _) => Err(TypeSafeError::new(ErrorKind::Validation(format!(
             "Base URL must use https:// (or http:// for localhost/127.0.0.1/::1 during development); got scheme `{scheme}` and an unsupported host."
-        ))),
+        )))),
     }
 }
 
@@ -607,7 +828,10 @@ mod tests {
     #[test]
     fn rejects_api_key_that_is_not_a_valid_header_value() {
         let err = TypeSafeClient::new("bad\nkey").unwrap_err();
-        assert!(matches!(err, TypeSafeError::Validation(_)), "got {err:?}");
+        assert!(
+            matches!(err.kind(), ErrorKind::Validation(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -736,6 +960,19 @@ mod tests {
         assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
     }
 
+    #[test]
+    fn parse_retry_after_ms_parses_milliseconds() {
+        assert_eq!(
+            parse_retry_after_ms("500"),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            parse_retry_after_ms("  1500  "),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(parse_retry_after_ms("not a number"), None);
+    }
+
     /// Builder errors are deterministic, so they must map to the
     /// non-retryable `Transport` variant, not `Connection`.
     #[test]
@@ -743,7 +980,7 @@ mod tests {
         let err = reqwest::Client::new().get("not a url").build().unwrap_err();
         let mapped = map_reqwest_error(err, Duration::from_secs(1));
         assert!(
-            matches!(mapped, TypeSafeError::Transport(_)),
+            matches!(mapped.kind(), ErrorKind::Transport(_)),
             "got {mapped:?}"
         );
         assert!(!mapped.is_retryable());
@@ -766,14 +1003,14 @@ mod tests {
         };
         let err = TypeSafeClient::from_config(config).unwrap_err();
         assert!(
-            matches!(err, TypeSafeError::Validation(ref m) if m.contains("model")),
+            matches!(err.kind(), ErrorKind::Validation(ref m) if m.contains("model")),
             "got {err:?}"
         );
     }
 
     #[test]
     fn timeout_error_preserves_subsecond_duration() {
-        let err = TypeSafeError::Timeout(Duration::from_millis(150));
+        let err = TypeSafeError::new(ErrorKind::Timeout(Duration::from_millis(150)));
         let msg = err.to_string();
         assert!(
             msg.contains("150ms"),
