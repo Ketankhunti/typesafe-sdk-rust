@@ -39,10 +39,15 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build docs
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
 
       - name: Run tests
-        run: cargo test --all
+        run: cargo test --all --all-features
 
   msrv:
     name: MSRV (1.88)
@@ -56,4 +61,4 @@ jobs:
           toolchain: "1.88"
 
       - name: Run tests
-        run: cargo test --all
+        run: cargo test --all --all-features

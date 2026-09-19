@@ -305,3 +305,49 @@ fn blocking_from_env_rejects_async_context() {
     );
     std::env::remove_var("TYPESAFE_API_KEY");
 }
+
+#[test]
+fn blocking_methods_reject_async_context() {
+    // A client built in sync code, then used from inside an async context,
+    // should return an ErrorKind::Runtime error instead of panicking.
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = blocking_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let result = rt.block_on(async { client.system_one("test", billing_question()) });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Runtime(msg) if msg.contains("async context")),
+        "expected Runtime error about async context, got: {err:?}"
+    );
+}
+
+#[test]
+fn blocking_list_models_rejects_async_context() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &models_body(),
+    )]);
+
+    let client = blocking_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let result = rt.block_on(async { client.list_models() });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Runtime(msg) if msg.contains("async context")),
+        "expected Runtime error about async context, got: {err:?}"
+    );
+}

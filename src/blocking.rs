@@ -1,7 +1,7 @@
 //! Blocking (synchronous) client for the TypeSafe AI API.
 //!
 //! Enabled with the `blocking` feature flag. Wraps the async
-//! [`TypeSafeClient`](crate::TypeSafeClient) with a current-thread Tokio
+//! [`TypeSafeClient`] with a current-thread Tokio
 //! runtime so you can call the API without `async`/`await`.
 //!
 //! ## Quickstart
@@ -50,8 +50,13 @@ use crate::types::{ListModelsResponse, SystemOneResponse};
 /// This client never panics. If the internal Tokio runtime cannot be created
 /// (extremely unlikely, typically system resource exhaustion), an
 /// [`ErrorKind::Runtime`] error is returned instead. If you attempt to
-/// construct a `BlockingClient` from inside an async context, an
+/// construct or use a `BlockingClient` from inside an async context, an
 /// [`ErrorKind::Runtime`] error is returned rather than panicking.
+///
+/// Note: dropping a `BlockingClient` that was created in sync code but is
+/// later dropped inside an async context will panic, because the Tokio
+/// runtime's `Drop` implementation cannot run inside another runtime.
+/// Construct and drop `BlockingClient` on the same (non-async) thread.
 #[non_exhaustive]
 pub struct BlockingClient {
     inner: TypeSafeClient,
@@ -67,10 +72,38 @@ impl fmt::Debug for BlockingClient {
 }
 
 impl BlockingClient {
+    /// Check whether the current thread is inside a Tokio async context.
+    /// Returns a `Runtime` error if so, so callers can avoid panicking.
+    fn guard_async_context() -> Result<()> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            Err(TypeSafeError::new(ErrorKind::Runtime(
+                "Cannot use a BlockingClient from inside an async context. \
+                 Use TypeSafeClient instead, or construct the BlockingClient \
+                 before entering the async runtime."
+                    .to_string(),
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Build a current-thread Tokio runtime, returning a `Runtime` error on
+    /// failure.
+    fn build_runtime() -> Result<tokio::runtime::Runtime> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                TypeSafeError::new(ErrorKind::Runtime(format!(
+                    "Failed to create Tokio runtime for blocking client: {e}"
+                )))
+            })
+    }
+
     /// Create a new blocking client with the given API key and default settings.
     ///
     /// # Errors
-    /// - [`TypeSafeError::Validation`] if the API key is empty.
+    /// - [`ErrorKind::Validation`] if the API key is empty.
     #[must_use = "the returned client should be used to make API calls"]
     pub fn new(api_key: impl Into<String>) -> Result<Self> {
         Self::from_config(ClientConfig {
@@ -82,32 +115,15 @@ impl BlockingClient {
     /// Create a new blocking client from a full [`ClientConfig`].
     ///
     /// # Errors
-    /// - [`TypeSafeError::Validation`] if the API key is empty, the base URL
+    /// - [`ErrorKind::Validation`] if the API key is empty, the base URL
     ///   is invalid, or the default model name is empty.
-    /// - [`TypeSafeError::Runtime`] if called from inside an async context or
+    /// - [`ErrorKind::Runtime`] if called from inside an async context or
     ///   if the Tokio runtime cannot be created.
     #[must_use = "the returned client should be used to make API calls"]
     pub fn from_config(config: ClientConfig) -> Result<Self> {
-        // Guard: creating a new runtime inside an existing async context
-        // would panic. Return a typed error instead.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return Err(TypeSafeError::new(ErrorKind::Runtime(
-                "Cannot create a BlockingClient from inside an async context. \
-                 Use TypeSafeClient instead, or construct the BlockingClient \
-                 before entering the async runtime."
-                    .to_string(),
-            )));
-        }
-
+        Self::guard_async_context()?;
         let inner = TypeSafeClient::from_config(config)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                TypeSafeError::new(ErrorKind::Runtime(format!(
-                    "Failed to create Tokio runtime for blocking client: {e}"
-                )))
-            })?;
+        let runtime = Self::build_runtime()?;
         Ok(Self { inner, runtime })
     }
 
@@ -116,31 +132,14 @@ impl BlockingClient {
     /// `TYPESAFE_BASE_URL` and `TYPESAFE_DEFAULT_MODEL` if set.
     ///
     /// # Errors
-    /// - [`TypeSafeError::Validation`] if `TYPESAFE_API_KEY` is unset or empty.
-    /// - [`TypeSafeError::Runtime`] if called from inside an async context or
+    /// - [`ErrorKind::Validation`] if `TYPESAFE_API_KEY` is unset or empty.
+    /// - [`ErrorKind::Runtime`] if called from inside an async context or
     ///   if the Tokio runtime cannot be created.
     #[must_use = "the returned client should be used to make API calls"]
     pub fn from_env() -> Result<Self> {
-        // Guard: creating a new runtime inside an existing async context
-        // would panic. Return a typed error instead.
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return Err(TypeSafeError::new(ErrorKind::Runtime(
-                "Cannot create a BlockingClient from inside an async context. \
-                 Use TypeSafeClient instead, or construct the BlockingClient \
-                 before entering the async runtime."
-                    .to_string(),
-            )));
-        }
-
+        Self::guard_async_context()?;
         let inner = TypeSafeClient::from_env()?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| {
-                TypeSafeError::new(ErrorKind::Runtime(format!(
-                    "Failed to create Tokio runtime for blocking client: {e}"
-                )))
-            })?;
+        let runtime = Self::build_runtime()?;
         Ok(Self { inner, runtime })
     }
 
@@ -161,12 +160,14 @@ impl BlockingClient {
     /// Blocks the calling thread until the response is received.
     ///
     /// # Errors
-    /// See [`TypeSafeClient::system_one`] for the full list of error variants.
+    /// - [`ErrorKind::Runtime`] if called from inside an async context.
+    ///   See [`TypeSafeClient::system_one`] for the full list of error variants.
     pub fn system_one(
         &self,
         state: impl Into<Value>,
         questions: HashMap<String, Question>,
     ) -> Result<SystemOneResponse> {
+        Self::guard_async_context()?;
         self.runtime
             .block_on(self.inner.system_one(state, questions))
     }
@@ -175,14 +176,16 @@ impl BlockingClient {
     /// override (`None` uses the client default).
     ///
     /// # Errors
-    /// See [`TypeSafeClient::system_one_with_model`] for the full list of
-    /// error variants.
+    /// - [`ErrorKind::Runtime`] if called from inside an async context.
+    ///   See [`TypeSafeClient::system_one_with_model`] for the full list of
+    ///   error variants.
     pub fn system_one_with_model(
         &self,
         state: impl Into<Value>,
         questions: HashMap<String, Question>,
         model: Option<&str>,
     ) -> Result<SystemOneResponse> {
+        Self::guard_async_context()?;
         self.runtime
             .block_on(self.inner.system_one_with_model(state, questions, model))
     }
@@ -191,13 +194,15 @@ impl BlockingClient {
     /// via a [`SystemOneOpts`] builder.
     ///
     /// # Errors
-    /// See [`TypeSafeClient::system_one_with_opts`] for the full list of
-    /// error variants.
+    /// - [`ErrorKind::Runtime`] if called from inside an async context.
+    ///   See [`TypeSafeClient::system_one_with_opts`] for the full list of
+    ///   error variants.
     pub fn system_one_with_opts(
         &self,
         questions: HashMap<String, Question>,
         opts: SystemOneOpts,
     ) -> Result<SystemOneResponse> {
+        Self::guard_async_context()?;
         self.runtime
             .block_on(self.inner.system_one_with_opts(questions, opts))
     }
@@ -205,8 +210,10 @@ impl BlockingClient {
     /// List available models. Sends `GET /v1/models`.
     ///
     /// # Errors
-    /// See [`TypeSafeClient::list_models`] for the full list of error variants.
+    /// - [`ErrorKind::Runtime`] if called from inside an async context.
+    ///   See [`TypeSafeClient::list_models`] for the full list of error variants.
     pub fn list_models(&self) -> Result<ListModelsResponse> {
+        Self::guard_async_context()?;
         self.runtime.block_on(self.inner.list_models())
     }
 }

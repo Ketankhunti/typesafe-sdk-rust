@@ -651,7 +651,7 @@ fn sends_user_agent_header() {
 
     let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
     assert!(
-        request.contains("typesafe-sdk/"),
+        request.contains("typesafeai-sdk/"),
         "missing user-agent in request:\n{request}"
     );
 }
@@ -1020,9 +1020,9 @@ fn extra_body_fields_are_sent_in_request() {
 }
 
 #[test]
-fn extra_body_overrides_known_fields_last_write_wins() {
+fn extra_body_rejects_reserved_key_model() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let (addr, captured) = capture_request_and_reply(
+    let (addr, _captured) = capture_request_and_reply(
         listener,
         http_response(
             200,
@@ -1039,21 +1039,19 @@ fn extra_body_overrides_known_fields_last_write_wins() {
         .with_retry(RetryPolicy::new(0));
     let client = TypeSafeClient::from_config(config).unwrap();
 
-    // Override "model" via extra_body — last-write-wins means the extra_body
-    // value should take precedence over the known field.
+    // "model" is a reserved key — must be rejected, not last-write-wins.
     let opts = typesafeai_sdk::SystemOneOpts::new()
         .with_extra_body(serde_json::json!({"model": "custom-model"}));
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let _ = rt
-        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
-        .unwrap();
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
 
-    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-    let body_start = request.find("\r\n\r\n").unwrap() + 4;
-    let body: serde_json::Value = serde_json::from_str(&request[body_start..]).unwrap();
-    // The extra_body value overrides the known field (last-write-wins).
-    assert_eq!(body["model"], "custom-model");
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("reserved") && msg.contains("model"),
+        "expected reserved key rejection for model, got: {msg}"
+    );
 }
 
 #[test]
@@ -1403,9 +1401,9 @@ fn custom_http_client_is_used() {
 // ===========================================================================
 
 #[test]
-fn extra_body_overrides_state_field() {
+fn extra_body_rejects_reserved_key_state_with_existing_state() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let (addr, captured) = capture_request_and_reply(
+    let (addr, _captured) = capture_request_and_reply(
         listener,
         http_response(
             200,
@@ -1422,21 +1420,21 @@ fn extra_body_overrides_state_field() {
         .with_retry(RetryPolicy::new(0));
     let client = TypeSafeClient::from_config(config).unwrap();
 
-    // Set state via opts, then override it via extra_body.
+    // Set state via opts, then try to override it via extra_body — must be
+    // rejected because "state" is a reserved key.
     let opts = typesafeai_sdk::SystemOneOpts::new()
         .with_state("original state")
         .with_extra_body(serde_json::json!({"state": "overridden state"}));
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let _ = rt
-        .block_on(async { client.system_one_with_opts(billing_question(), opts).await })
-        .unwrap();
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
 
-    let request = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-    let body_start = request.find("\r\n\r\n").unwrap() + 4;
-    let body: serde_json::Value = serde_json::from_str(&request[body_start..]).unwrap();
-    // The extra_body value should override the known field.
-    assert_eq!(body["state"], "overridden state");
+    let err = result.unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("reserved") && msg.contains("state"),
+        "expected reserved key rejection for state, got: {msg}"
+    );
 }
 
 // ===========================================================================
@@ -1457,7 +1455,7 @@ fn extra_body_cannot_empty_questions() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Override questions with an empty object via extra_body — should be
-    // rejected by re-validation, not silently accepted.
+    // rejected because `questions` is a reserved key.
     let opts =
         typesafeai_sdk::SystemOneOpts::new().with_extra_body(serde_json::json!({"questions": {}}));
 
@@ -1465,8 +1463,8 @@ fn extra_body_cannot_empty_questions() {
 
     let err = result.unwrap_err();
     assert!(
-        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("question")),
-        "expected Validation error about questions, got: {err:?}"
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("reserved") && msg.contains("questions")),
+        "expected Validation error about reserved key `questions`, got: {err:?}"
     );
 }
 
@@ -1484,7 +1482,7 @@ fn extra_body_cannot_empty_model() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     // Override model with an empty string via extra_body — should be
-    // rejected by re-validation.
+    // rejected because `model` is a reserved key.
     let opts =
         typesafeai_sdk::SystemOneOpts::new().with_extra_body(serde_json::json!({"model": ""}));
 
@@ -1492,8 +1490,8 @@ fn extra_body_cannot_empty_model() {
 
     let err = result.unwrap_err();
     assert!(
-        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("Model")),
-        "expected Validation error about model, got: {err:?}"
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("reserved") && msg.contains("model")),
+        "expected Validation error about reserved key `model`, got: {err:?}"
     );
 }
 
@@ -1519,6 +1517,83 @@ fn extra_body_rejects_non_object() {
     assert!(
         matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("extra_body")),
         "expected Validation error about extra_body, got: {err:?}"
+    );
+}
+
+#[test]
+fn extra_body_rejects_reserved_key_state() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let opts =
+        typesafeai_sdk::SystemOneOpts::new().with_extra_body(serde_json::json!({"state": "oops"}));
+
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("reserved") && msg.contains("state")),
+        "expected Validation error about reserved key `state`, got: {err:?}"
+    );
+}
+
+#[test]
+fn extra_body_rejects_non_string_model() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // `model` is a reserved key — any value (not just empty string) is rejected.
+    let opts =
+        typesafeai_sdk::SystemOneOpts::new().with_extra_body(serde_json::json!({"model": 42}));
+
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("reserved")),
+        "expected Validation error about reserved key, got: {err:?}"
+    );
+}
+
+#[test]
+fn extra_body_rejects_wrong_type_questions() {
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = test_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // `questions` is a reserved key — any type (string, array, etc.) is rejected.
+    let opts = typesafeai_sdk::SystemOneOpts::new()
+        .with_extra_body(serde_json::json!({"questions": "oops"}));
+
+    let result = rt.block_on(async { client.system_one_with_opts(billing_question(), opts).await });
+
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err.kind(), ErrorKind::Validation(msg) if msg.contains("reserved")),
+        "expected Validation error about reserved key, got: {err:?}"
     );
 }
 

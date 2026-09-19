@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-19
+
+### Fixed
+
+- **Retry budget is now a hard cap**: Previously, each attempt used the full
+  per-attempt timeout regardless of elapsed time, so 3 × 10 s attempts could
+  exceed a 30 s budget. Each attempt's timeout is now capped at
+  `budget - elapsed`, and the loop stops immediately when the budget is
+  exhausted.
+- **`extra_body` reserved keys rejected outright**: `extra_body` can no longer
+  override `state`, `model`, or `questions` via last-write-wins. Any reserved
+  key in `extra_body` is now rejected with a `Validation` error, regardless of
+  value type. Use the dedicated methods (`with_state`, `with_model`, or the
+  `questions` argument) instead.
+- **Blocking client guards all methods against async context**: Previously
+  only `from_config`/`from_env` checked for an active Tokio runtime. All
+  methods (`system_one`, `system_one_with_model`, `system_one_with_opts`,
+  `list_models`) now return `ErrorKind::Runtime` before calling `block_on`,
+  preventing a runtime panic.
+- **User-Agent uses crate name**: The SDK User-Agent header now uses
+  `env!("CARGO_PKG_NAME")` (`typesafeai-sdk/0.3.2`) instead of a hardcoded
+  `typesafe-sdk/`, matching the published crate name.
+- **Broken intra-doc links fixed**: All `[TypeSafeError::Variant]` links in doc
+  comments have been corrected to `[ErrorKind::Variant]` so `cargo doc` passes
+  with `-D warnings`.
+- **`SystemOneOpts` Debug redacts `extra_body`**: The `Debug` impl now redacts
+  `extra_body` (which may contain sensitive user data) alongside `state` and
+  header values.
+- **Avoid deep copy in response parsing**: `serde_json::from_value(raw.clone())`
+  replaced with `T::deserialize(&raw)`, avoiding a full deep copy of the
+  response body.
+
+### Changed
+
+- **CI now uses `--all-features`**: `cargo clippy`, `cargo test`, and `cargo doc`
+  all run with `--all-features` so the `blocking` feature is always exercised.
+  A `cargo doc --no-deps --all-features` step with `RUSTDOCFLAGS=-D warnings`
+  has been added.
+- **`.editorconfig` added**: Enforces LF line endings, UTF-8 encoding, and
+  indentation rules for Rust, TOML, YAML, and Markdown files.
+- **Line endings normalized**: `LICENSE` and `.github/workflows/ci.yml`
+  converted from CRLF to LF.
+
 ## [0.3.1] - 2026-09-18
 
 ### Fixed
@@ -57,8 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `err.kind()` matching. Also fixed stale `x-request-id` →
   `x-typesafe-request-id` in the [0.2.0] changelog.
 - **Standard #3: `reqwest::Error` leaked in public API**: `ErrorKind::Transport`
-  now wraps `String` instead of `reqwest::Error` via `#[from]`, so `reqwest`
-  no longer appears in the public API surface.
+  now wraps `String` instead of `reqwest::Error` via `#[from]`, so `reqwest::Error`
+  no longer appears in the public API surface. Note: `reqwest::Client` is still
+  exposed via `ClientConfig::http_client` and `with_http_client()`, and
+  `From<reqwest::Error> for TypeSafeError` still exists. A reqwest major version
+  bump remains a breaking change for users who supply a custom HTTP client.
 - **Docs #1: README install version and `ClientConfig` example**: Install
   version updated from `0.1` to `0.3`. The `ClientConfig` struct literal
   example (which does not compile due to `#[non_exhaustive]`) replaced with
@@ -163,4 +209,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.1.0
 
-> **Note:** The crate is published to crates.io as `typesafe-ai-sdk`. The GitHub repository name remains `typesafe-sdk-rust`.
+> **Note:** The crate is published to crates.io as `typesafeai-sdk`. The GitHub repository name remains `typesafe-sdk-rust`.

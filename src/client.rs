@@ -74,7 +74,7 @@ const PROTECTED_HEADER_NAMES: &[&str] = &[
 const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-latest";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
-const SDK_USER_AGENT: &str = concat!("typesafe-sdk/", env!("CARGO_PKG_VERSION"));
+const SDK_USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 const SYSTEM_ONE_PATH: &str = "/v1/systemone";
 const MODELS_PATH: &str = "/v1/models";
 const RETRY_AFTER_MS_HEADER: &str = "retry-after-ms";
@@ -281,8 +281,8 @@ pub struct SystemOneOpts {
     /// The state to evaluate. If not set, defaults to `null`.
     pub(crate) state: Option<Value>,
     /// Extra fields to merge into the request body for forward compatibility.
-    /// These are merged **last** (last-write-wins): a key that collides with
-    /// `state`, `model`, or `questions` overrides the known field.
+    /// Reserved keys (`state`, `model`, `questions`) are rejected; use the
+    /// dedicated methods instead. Object values are replaced, not deep-merged.
     pub(crate) extra_body: Option<Value>,
     /// Additional headers to send with this call only.
     pub(crate) extra_headers: Vec<(String, String)>,
@@ -298,7 +298,11 @@ impl fmt::Debug for SystemOneOpts {
             .field("model", &self.model)
             // Redact state — it may contain sensitive user data.
             .field("state", &self.state.as_ref().map(|_| "<redacted>"))
-            .field("extra_body", &self.extra_body)
+            // Redact extra_body — it may contain sensitive user data.
+            .field(
+                "extra_body",
+                &self.extra_body.as_ref().map(|_| "<redacted>"),
+            )
             // Redact header values — they may contain tokens.
             .field(
                 "extra_headers",
@@ -335,9 +339,10 @@ impl SystemOneOpts {
     }
 
     /// Set extra fields to merge into the request body for forward
-    /// compatibility. Merging is **last-write-wins**: a key that collides
-    /// with `state`, `model`, or `questions` overrides the known field,
-    /// and object values are replaced rather than deep-merged.
+    /// compatibility. Reserved keys (`state`, `model`, `questions`) are
+    /// rejected with a validation error — use the dedicated methods
+    /// (`with_state`, `with_model`, or the `questions` argument) instead.
+    /// Object values are replaced rather than deep-merged.
     #[must_use = "the returned SystemOneOpts should be used"]
     pub fn with_extra_body(mut self, extra: Value) -> Self {
         self.extra_body = Some(extra);
@@ -517,15 +522,15 @@ impl TypeSafeClient {
     /// To avoid replaying a POST whose body the server already processed,
     /// errors that occur while *reading the response body* — including
     /// timeouts and truncated bodies — are classified as non-retryable
-    /// [`TypeSafeError::Transport`] rather than [`TypeSafeError::Connection`]
-    /// or [`TypeSafeError::Timeout`].
+    /// [`ErrorKind::Transport`] rather than [`ErrorKind::Connection`]
+    /// or [`ErrorKind::Timeout`].
     ///
     /// # Errors
-    /// - [`TypeSafeError::Validation`] if questions are empty or a choice or
+    /// - [`ErrorKind::Validation`] if questions are empty or a choice or
     ///   score question has fewer than two criteria.
-    /// - [`TypeSafeError::Authentication`] if the API key is invalid.
-    /// - [`TypeSafeError::RateLimit`] if rate-limited (after retries).
-    /// - [`TypeSafeError::Connection`] / [`TypeSafeError::Timeout`] on
+    /// - [`ErrorKind::Authentication`] if the API key is invalid.
+    /// - [`ErrorKind::RateLimit`] if rate-limited (after retries).
+    /// - [`ErrorKind::Connection`] / [`ErrorKind::Timeout`] on
     ///   network failures (after retries).
     pub async fn system_one(
         &self,
@@ -599,14 +604,25 @@ impl TypeSafeClient {
         let mut body = serde_json::to_value(&request)?;
 
         // Merge extra_body fields at the top level for forward compatibility.
-        // Last-write-wins: extra_body keys override known fields (state, model,
-        // questions). Object values are replaced rather than deep-merged.
+        // Reserved keys (state, model, questions) are rejected outright so
+        // that extra_body cannot override or bypass validation of the known
+        // fields.
         if let Some(extra) = &opts.extra_body {
             let extra_obj = extra.as_object().ok_or_else(|| {
                 TypeSafeError::new(ErrorKind::Validation(
                     "extra_body must be a JSON object.".to_string(),
                 ))
             })?;
+            const RESERVED_KEYS: &[&str] = &["state", "model", "questions"];
+            for key in extra_obj.keys() {
+                if RESERVED_KEYS.contains(&key.as_str()) {
+                    return Err(TypeSafeError::new(ErrorKind::Validation(format!(
+                        "extra_body cannot override reserved key `{key}`. \
+                         Use the dedicated method (with_state, with_model, or the \
+                         questions argument) instead."
+                    ))));
+                }
+            }
             let body_obj = body.as_object_mut().ok_or_else(|| {
                 TypeSafeError::new(ErrorKind::Validation(
                     "Internal error: request body is not a JSON object.".to_string(),
@@ -614,30 +630,6 @@ impl TypeSafeClient {
             })?;
             for (k, v) in extra_obj {
                 body_obj.insert(k.clone(), v.clone());
-            }
-        }
-
-        // Re-validate fields that extra_body may have overridden, so a
-        // last-write-wins override cannot bypass the checks above.
-        if let Some(obj) = body.as_object() {
-            if let Some(m) = obj.get("model").and_then(|v| v.as_str()) {
-                if m.trim().is_empty() {
-                    return Err(TypeSafeError::new(ErrorKind::Validation(
-                        "Model name cannot be empty.".to_string(),
-                    )));
-                }
-            }
-            if let Some(q) = obj.get("questions") {
-                let empty = match q {
-                    Value::Object(map) => map.is_empty(),
-                    Value::Null => true,
-                    _ => false,
-                };
-                if empty {
-                    return Err(TypeSafeError::new(ErrorKind::Validation(
-                        "At least one question is required.".to_string(),
-                    )));
-                }
             }
         }
 
@@ -679,8 +671,24 @@ impl TypeSafeClient {
         let started = std::time::Instant::now();
         let mut attempt = 0;
         loop {
+            // Cap this attempt's timeout at the remaining budget so a single
+            // attempt cannot push the total elapsed time past the budget.
+            let attempt_timeout = match retry.budget {
+                Some(budget) => {
+                    let remaining = budget.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        // Nothing left in the budget — don't even start.
+                        // (Only reached on retry iterations; the first attempt
+                        // always has the full budget.)
+                        return Err(failure_on_budget_exhausted(retry));
+                    }
+                    std::cmp::min(timeout, remaining)
+                }
+                None => timeout,
+            };
+
             match self
-                .attempt_request(&method, &url, body.as_ref(), opts, timeout)
+                .attempt_request(&method, &url, body.as_ref(), opts, attempt_timeout)
                 .await
             {
                 Ok(resp) => return Ok(resp),
@@ -707,14 +715,6 @@ impl TypeSafeClient {
 
                     tokio::time::sleep(delay).await;
                     attempt += 1;
-
-                    // Post-attempt hard cap: if the elapsed time (including
-                    // the attempt and the sleep) already exceeds the budget,
-                    // don't start another attempt that would push further past
-                    // it.
-                    if retry.budget_exceeded(started.elapsed(), Duration::ZERO) {
-                        return Err(failure.error);
-                    }
                 }
             }
         }
@@ -818,7 +818,7 @@ impl TypeSafeClient {
                     field_path: None,
                 }))
             })?;
-            let mut result: T = serde_json::from_value(raw.clone()).map_err(|e| {
+            let mut result: T = T::deserialize(&raw).map_err(|e| {
                 Failure::from(TypeSafeError::new(ErrorKind::ResponseValidation {
                     message: format!(
                         "Failed to parse response body: {e}\nBody: {}",
@@ -913,14 +913,21 @@ async fn read_body_capped(
     Ok(bytes)
 }
 
+/// Build a `Timeout` error when the retry budget is exhausted before an
+/// attempt can even start. Uses the configured per-attempt timeout in the
+/// message so the caller sees what *would* have been used.
+fn failure_on_budget_exhausted(retry: &RetryPolicy) -> TypeSafeError {
+    TypeSafeError::new(ErrorKind::Timeout(retry.budget.unwrap_or(Duration::ZERO)))
+}
+
 /// Map a `reqwest` error to the appropriate `TypeSafeError` variant.
 ///
-/// - timeouts -> [`TypeSafeError::Timeout`], reporting the *configured* timeout
-/// - connect failures (refused, reset, DNS) -> [`TypeSafeError::Connection`]
+/// - timeouts -> [`ErrorKind::Timeout`], reporting the *configured* timeout
+/// - connect failures (refused, reset, DNS) -> [`ErrorKind::Connection`]
 /// - everything else (body read, builder, redirect, decode, request
 ///   construction) is deterministic or occurs after the server has already
 ///   processed the request, so it stays a non-retryable
-///   [`TypeSafeError::Transport`]
+///   [`ErrorKind::Transport`]
 ///
 /// `is_request()` and `is_body()` are intentionally **not** classified as
 /// `Connection`. `is_request()` covers the entire request lifecycle, including
