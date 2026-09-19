@@ -35,7 +35,7 @@ pub enum ErrorKind {
     #[error("rate limit exceeded: {0}")]
     RateLimit(String),
 
-    /// `5xx` — server-side error.
+    /// `500`, `502`, `503`, or `504` — retryable server-side error.
     #[error("internal server error: {0}")]
     InternalServer(String),
 

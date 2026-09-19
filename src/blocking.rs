@@ -47,16 +47,12 @@ use crate::types::{ListModelsResponse, SystemOneResponse};
 ///
 /// # Panics
 ///
-/// This client never panics. If the internal Tokio runtime cannot be created
-/// (extremely unlikely, typically system resource exhaustion), an
-/// [`ErrorKind::Runtime`] error is returned instead. If you attempt to
-/// construct or use a `BlockingClient` from inside an async context, an
-/// [`ErrorKind::Runtime`] error is returned rather than panicking.
-///
-/// Note: dropping a `BlockingClient` that was created in sync code but is
-/// later dropped inside an async context will panic, because the Tokio
-/// runtime's `Drop` implementation cannot run inside another runtime.
-/// Construct and drop `BlockingClient` on the same (non-async) thread.
+/// The constructors and API methods return [`ErrorKind::Runtime`] instead
+/// of panicking when used from an async context. However, a `BlockingClient`
+/// created in synchronous code must also be dropped outside an async
+/// runtime because Tokio's runtime `Drop` implementation may panic if run
+/// inside another runtime. Construct and drop `BlockingClient` on the same
+/// (non-async) thread.
 #[non_exhaustive]
 pub struct BlockingClient {
     inner: TypeSafeClient,
