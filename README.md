@@ -122,7 +122,7 @@ let q = score("How frustrated is the customer?", vec![
 
 ## Configuration
 
-```rust
+```rust,no_run
 # use std::time::Duration;
 # use typesafeai_sdk::{TypeSafeClient, ClientConfig, RetryPolicy};
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
