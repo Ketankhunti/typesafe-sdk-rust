@@ -13,6 +13,9 @@ jobs:
   test:
     name: Test & Lint
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      checks: write
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -57,6 +60,8 @@ jobs:
 
       - name: Security audit
         uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   msrv:
     name: MSRV (1.88)

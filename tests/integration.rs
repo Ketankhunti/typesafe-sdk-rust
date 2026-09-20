@@ -1858,3 +1858,72 @@ fn does_not_follow_redirects() {
         "expected error for 307 redirect (should not be followed), but got success"
     );
 }
+
+// ===========================================================================
+// Bug #7: retry timeout cap is actually enforced
+// ===========================================================================
+
+/// A retry's per-call timeout must be capped at the remaining budget so the
+/// total elapsed time stays within the budget.  We use a server that hangs
+/// forever (never responds), a 1 s per-call timeout, and a 1.5 s budget.
+///
+/// - The first attempt times out after ~1 s (full timeout, not budget-capped).
+/// - The retry delay is tiny (1 ms), so we enter the retry loop quickly.
+/// - The retry's timeout is capped at `1.5 s - 1 s = 0.5 s`, so the second
+///   attempt times out after ~0.5 s.
+/// - Total elapsed should be ~1.5 s, well under the 1.8 s upper bound.
+///
+/// Without the cap, the second attempt would use the full 1 s timeout and
+/// the total would be ~2 s.
+#[test]
+fn retry_timeout_is_capped_by_remaining_budget() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
+    // Server accepts connections but never responds — forces a timeout
+    // on every attempt.
+    std::thread::spawn(move || {
+        for _ in 0..5 {
+            let (mut stream, _) = match listener.accept() {
+                Ok(s) => s,
+                Err(_) => break,
+            };
+            // Read and discard the request, then hang forever.
+            let _ = read_request(&mut stream);
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    });
+
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(1))
+        .with_retry(
+            RetryPolicy::new(5)
+                .with_base_delay(Duration::from_millis(1))
+                .with_max_delay(Duration::from_millis(1))
+                .with_budget(Some(Duration::from_millis(1500))),
+        );
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let start = Instant::now();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+    let elapsed = start.elapsed();
+
+    // Must be a Timeout (the server never responds).
+    assert!(
+        matches!(err.kind(), ErrorKind::Timeout(_)),
+        "expected Timeout, got {err:?}"
+    );
+
+    // Total elapsed must stay within the budget + a small margin for
+    // connection overhead and jitter.  Without the cap, the second
+    // attempt alone would take 1 s, pushing the total past 2 s.
+    assert!(
+        elapsed < Duration::from_millis(1800),
+        "retry timeout was not capped by remaining budget: elapsed {elapsed:?}"
+    );
+}

@@ -916,17 +916,14 @@ impl TypeSafeClient {
     /// `ErrorKind::is_retryable`) and the error variant are derived from
     /// this, so they can never drift apart.
     fn kind_for_status(status: StatusCode) -> Option<ErrorKind> {
-        match status {
-            // Success — no error.
-            StatusCode::OK
-            | StatusCode::CREATED
-            | StatusCode::ACCEPTED
-            | StatusCode::NO_CONTENT
-            | StatusCode::PARTIAL_CONTENT
-            | StatusCode::MULTI_STATUS
-            | StatusCode::ALREADY_REPORTED
-            | StatusCode::IM_USED => None,
+        // All 2xx statuses are success — no error. Using `is_success()`
+        // instead of a hardcoded list ensures we don't miss codes like 203,
+        // 205, or 208.
+        if status.is_success() {
+            return None;
+        }
 
+        match status {
             // Client errors.
             StatusCode::UNAUTHORIZED => Some(ErrorKind::Authentication(String::new())),
             StatusCode::BAD_REQUEST => Some(ErrorKind::BadRequest(String::new())),

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-09-20
+
+### Fixed
+
+- **CI security audit step fails**: `rustsec/audit-check@v2.0.0` requires a
+  `token` input and `checks: write` permission. Added both to the CI workflow.
+- **Some 2xx responses treated as errors**: `kind_for_status()` listed success
+  codes by hand and omitted 203, 205, 208, and others. It ran before the
+  `is_success()` check, so those became `Api{status}` errors. Now uses
+  `status.is_success()` as the first check.
+- **Blocking client docs were stale**: Module and struct docs said
+  "current-thread runtime" but it's now multi-threaded with one worker. Updated
+  to accurately describe the blocking behavior and recommend
+  `TypeSafeClient` or `spawn_blocking` for async code.
+- **Helper thread panic was swallowed**: `expect("helper thread panicked")`
+  hid the original panic message. Now uses `match` on `recv()` with a
+  `resume_unwind`-style panic message.
+
+### Added
+
+- `retry_timeout_is_capped_by_remaining_budget` integration test that verifies
+  a retry's per-call timeout is actually capped at the remaining budget.
+
 ## [0.3.7] - 2026-09-20
 
 ### Fixed

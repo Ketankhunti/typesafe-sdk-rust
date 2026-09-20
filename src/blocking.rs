@@ -1,8 +1,8 @@
 //! Blocking (synchronous) client for the TypeSafe AI API.
 //!
 //! Enabled with the `blocking` feature flag. Wraps the async
-//! [`TypeSafeClient`] with a current-thread Tokio
-//! runtime so you can call the API without `async`/`await`.
+//! [`TypeSafeClient`] with a dedicated multi-threaded Tokio runtime
+//! (one worker thread) so you can call the API without `async`/`await`.
 //!
 //! ## Quickstart
 //!
@@ -38,21 +38,30 @@ use crate::types::{ListModelsResponse, SystemOneResponse};
 
 /// A blocking (synchronous) client for the TypeSafe AI API.
 ///
-/// Wraps an async [`TypeSafeClient`] with a dedicated current-thread Tokio
-/// runtime. Each method call blocks the calling thread until the response
-/// is received.
+/// Wraps an async [`TypeSafeClient`] with a dedicated multi-threaded Tokio
+/// runtime (one worker thread). Each method call blocks the calling thread
+/// until the response is received — up to the configured timeout multiplied
+/// by the number of retries (potentially 30 s or more).
 ///
 /// Construct with [`BlockingClient::new`], [`BlockingClient::from_env`], or
 /// [`BlockingClient::from_config`].
 ///
 /// # Async-context safety
 ///
-/// The constructors and API methods are safe to call from inside a Tokio
-/// async context (including `spawn_blocking` threads). When a Tokio runtime
-/// is detected on the current thread, `block_on` is executed on a dedicated
-/// helper thread to avoid the "cannot start a runtime from within a runtime"
-/// panic. Dropping a `BlockingClient` inside an async context is also safe
-/// because the runtime is shut down in the background.
+/// The constructors and API methods will **not panic** when called from
+/// inside a Tokio async context (including `spawn_blocking` threads).
+/// When a Tokio runtime is detected on the current thread, `block_on` is
+/// executed on a dedicated helper thread to avoid the "cannot start a
+/// runtime from within a runtime" panic.
+///
+/// However, each call still **blocks the calling executor thread** for the
+/// entire duration of the request (up to timeout × retries). On a
+/// current-thread runtime this stalls all other tasks. For async code,
+/// prefer [`TypeSafeClient`] directly, or wrap blocking calls in
+/// `tokio::task::spawn_blocking`.
+///
+/// Dropping a `BlockingClient` inside an async context is safe because the
+/// runtime is shut down in the background via `shutdown_background()`.
 #[non_exhaustive]
 pub struct BlockingClient {
     inner: TypeSafeClient,
@@ -91,7 +100,10 @@ impl BlockingClient {
                     let result = handle.block_on(future);
                     let _ = tx.send(result);
                 });
-                rx.recv().expect("helper thread panicked")
+                match rx.recv() {
+                    Ok(result) => result,
+                    Err(_) => panic!("helper thread panicked"),
+                }
             })
         } else {
             runtime.block_on(future)
