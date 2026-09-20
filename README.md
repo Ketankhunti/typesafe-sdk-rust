@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/typesafeai-sdk.svg)](https://crates.io/crates/typesafeai-sdk)
 [![docs.rs](https://docs.rs/typesafeai-sdk/badge.svg)](https://docs.rs/typesafeai-sdk)
-[![license](https://img.shields.io/crates/l/typesafeai-sdk.svg)](LICENSE)
+[![license](https://img.shields.io/crates/l/typesafeai-sdk.svg)](https://github.com/Ketankhunti/typesafe-sdk-rust/blob/main/LICENSE)
 
 Rust SDK for [TypeSafe AI](https://typesafe.ai) — typed judgments from System One
 models like **Jev**.
@@ -169,7 +169,7 @@ let client = TypeSafeClient::from_config(config)?;
 All SDK operations return `Result<T, TypeSafeError>`. Errors map to typed
 variants:
 
-```rust
+```rust,ignore
 use typesafeai_sdk::{TypeSafeError, ErrorKind};
 
 match client.system_one(state, questions).await {

@@ -1,6 +1,6 @@
 [package]
 name = "typesafeai-sdk"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -26,7 +26,7 @@ tokio = { version = "1", features = ["time"] }
 
 [features]
 default = []
-blocking = ["tokio/rt"]
+blocking = ["tokio/rt-multi-thread"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

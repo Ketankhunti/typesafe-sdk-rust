@@ -162,6 +162,11 @@ impl ClientConfig {
     }
 
     /// Set the per-attempt timeout.
+    ///
+    /// This is the timeout for a single HTTP request, not the total time
+    /// across all retries. The first attempt always uses the full configured
+    /// timeout; subsequent attempts are capped at the remaining retry budget
+    /// (if set). See [`RetryPolicy::budget`](crate::RetryPolicy::budget).
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -289,7 +294,8 @@ pub struct SystemOneOpts {
     pub(crate) state: Option<Value>,
     /// Extra fields to merge into the request body for forward compatibility.
     /// Reserved keys (`state`, `model`, `questions`) are rejected; use the
-    /// dedicated methods instead. Object values are replaced, not deep-merged.
+    /// dedicated methods instead. Object values are replaced rather than
+    /// deep-merged.
     pub(crate) extra_body: Option<Value>,
     /// Additional headers to send with this call only.
     pub(crate) extra_headers: Vec<(String, String)>,
@@ -520,8 +526,8 @@ impl TypeSafeClient {
     /// # Retry safety
     ///
     /// This is a `POST` request. The SDK automatically retries on transient
-    /// failures (429, 500, 502, 503, 504, 529, connection errors, timeouts),
-    /// but a timeout does
+    /// failures (408, 429, 500, 502, 503, 504, 529, connection errors,
+    /// timeouts), but a timeout does
     /// not guarantee the server did not process the request. If the endpoint
     /// has side effects (credit consumption, usage recording, downstream
     /// triggers), a retry may result in duplicate processing. Future versions
@@ -678,21 +684,29 @@ impl TypeSafeClient {
 
         let started = std::time::Instant::now();
         let mut attempt = 0;
+        let mut last_error: Option<TypeSafeError> = None;
         loop {
-            // Cap this attempt's timeout at the remaining budget so a single
-            // attempt cannot push the total elapsed time past the budget.
-            let attempt_timeout = match retry.budget {
-                Some(budget) => {
-                    let remaining = budget.saturating_sub(started.elapsed());
-                    if remaining.is_zero() {
-                        // Nothing left in the budget — don't even start.
-                        // (Only reached on retry iterations; the first attempt
-                        // always has the full budget.)
-                        return Err(failure_on_budget_exhausted(retry));
+            // The first attempt (attempt == 0) always uses the full configured
+            // timeout — the budget should not shorten the initial request.
+            // On subsequent attempts, cap the timeout at the remaining budget
+            // so a single retry cannot push the total elapsed time past it.
+            let attempt_timeout = if attempt == 0 {
+                timeout
+            } else {
+                match retry.budget {
+                    Some(budget) => {
+                        let remaining = budget.saturating_sub(started.elapsed());
+                        if remaining.is_zero() {
+                            // Budget exhausted — return the last real error,
+                            // not a synthetic Timeout.
+                            return Err(
+                                last_error.unwrap_or_else(|| failure_on_budget_exhausted(retry))
+                            );
+                        }
+                        std::cmp::min(timeout, remaining)
                     }
-                    std::cmp::min(timeout, remaining)
+                    None => timeout,
                 }
-                None => timeout,
             };
 
             match self
@@ -701,8 +715,10 @@ impl TypeSafeClient {
             {
                 Ok(resp) => return Ok(resp),
                 Err(failure) => {
-                    if !failure.error.is_retryable() || attempt >= retry.max_retries {
-                        return Err(failure.error);
+                    let err = failure.error;
+
+                    if !err.is_retryable() || attempt >= retry.max_retries {
+                        return Err(err);
                     }
 
                     let delay = match failure.retry_after {
@@ -711,16 +727,35 @@ impl TypeSafeClient {
                         // stalling the caller.
                         Some(hint) => match retry.delay_for_retry_after(attempt, hint) {
                             Some(delay) => delay,
-                            None => return Err(failure.error),
+                            None => return Err(err),
                         },
                         None => retry.delay_for_with_jitter(attempt, jitter_seed()),
                     };
 
                     // Stop before a delay that would exceed the budget.
+                    // Return the last real error, not a synthetic Timeout.
                     if retry.budget_exceeded(started.elapsed(), delay) {
-                        return Err(failure.error);
+                        return Err(err);
                     }
 
+                    // Require a minimum useful attempt window after sleeping.
+                    // If the remaining budget after the delay is too small to
+                    // be useful (less than 10% of the configured timeout, or
+                    // less than 100ms), don't bother sleeping and retrying —
+                    // return the last real error.
+                    if let Some(budget) = retry.budget {
+                        let remaining_after_delay =
+                            budget.saturating_sub(started.elapsed().saturating_add(delay));
+                        let min_window = std::cmp::max(
+                            Duration::from_millis(100),
+                            Duration::from_millis(timeout.as_millis() as u64 / 10),
+                        );
+                        if remaining_after_delay < min_window {
+                            return Err(err);
+                        }
+                    }
+
+                    last_error = Some(err);
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                 }
@@ -808,23 +843,13 @@ impl TypeSafeClient {
                     .and_then(parse_retry_after)
             });
 
-        // For retryable error statuses, classify the error *before* reading
-        // the body. This ensures an oversized 503/5xx response is still
-        // retried rather than becoming a non-retryable `Transport` error
-        // from the body-size cap.
-        let retryable_status = matches!(
-            status,
-            StatusCode::TOO_MANY_REQUESTS
-                | StatusCode::INTERNAL_SERVER_ERROR
-                | StatusCode::BAD_GATEWAY
-                | StatusCode::SERVICE_UNAVAILABLE
-                | StatusCode::GATEWAY_TIMEOUT
-        ) || status.as_u16() == 529;
-
-        if retryable_status {
-            // Read the body for the error message, but if the body read
-            // itself fails (timeout, oversized), still return the retryable
-            // error kind — the status code is authoritative.
+        // Classify the status code into an `ErrorKind` once, using a single
+        // source of truth. For error statuses, the body is only used for the
+        // message — the kind is determined by the status code alone.
+        if let Some(kind) = Self::kind_for_status(status) {
+            // For error statuses, read the body for the message. If the body
+            // read itself fails (timeout, oversized), still return the error
+            // classified from the status code — the status is authoritative.
             let text = match read_body_capped(response, MAX_RESPONSE_BODY_BYTES).await {
                 Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(_) => String::new(),
@@ -832,13 +857,7 @@ impl TypeSafeClient {
             let message = Self::extract_error_message(&text)
                 .map(|m| truncate(&m, MAX_ERROR_BODY_CHARS))
                 .unwrap_or_else(|| truncate(&text, MAX_ERROR_BODY_CHARS));
-            let kind = if status == StatusCode::TOO_MANY_REQUESTS {
-                ErrorKind::RateLimit(message)
-            } else if status.as_u16() == 529 {
-                ErrorKind::Overloaded(message)
-            } else {
-                ErrorKind::InternalServer(message)
-            };
+            let kind = Self::with_message(kind, message);
             return Err(Failure {
                 error: TypeSafeError::with_request_id(kind, request_id),
                 retry_after,
@@ -878,28 +897,75 @@ impl TypeSafeClient {
             return Ok(result);
         }
 
-        // Map remaining HTTP status codes to typed errors, mirroring the
-        // Python/JS SDKs. Retryable statuses (429, 500, 502, 503, 504, 529)
-        // are handled above. Truncate the extracted message to prevent
-        // unbounded error strings.
-        let message = Self::extract_error_message(&text)
-            .map(|m| truncate(&m, MAX_ERROR_BODY_CHARS))
-            .unwrap_or_else(|| truncate(&text, MAX_ERROR_BODY_CHARS));
-        let kind = match status {
-            StatusCode::UNAUTHORIZED => ErrorKind::Authentication(message),
-            StatusCode::BAD_REQUEST => ErrorKind::BadRequest(message),
-            StatusCode::NOT_FOUND => ErrorKind::NotFound(message),
-            StatusCode::UNPROCESSABLE_ENTITY => ErrorKind::UnprocessableEntity(message),
-            StatusCode::REQUEST_TIMEOUT => ErrorKind::RequestTimeout(message),
-            _ => ErrorKind::Api {
-                status: status.as_u16(),
-                message,
-            },
+        // This should be unreachable — all non-success statuses are handled
+        // by kind_for_status above. But just in case, return a generic API
+        // error.
+        let kind = ErrorKind::Api {
+            status: status.as_u16(),
+            message: String::new(),
         };
         Err(Failure {
             error: TypeSafeError::with_request_id(kind, request_id),
             retry_after,
         })
+    }
+
+    /// Classify an HTTP status code into an `ErrorKind`. Returns `None` for
+    /// success statuses (2xx). This is the single source of truth for
+    /// status-to-kind mapping — both the retry decision (via
+    /// `ErrorKind::is_retryable`) and the error variant are derived from
+    /// this, so they can never drift apart.
+    fn kind_for_status(status: StatusCode) -> Option<ErrorKind> {
+        match status {
+            // Success — no error.
+            StatusCode::OK
+            | StatusCode::CREATED
+            | StatusCode::ACCEPTED
+            | StatusCode::NO_CONTENT
+            | StatusCode::PARTIAL_CONTENT
+            | StatusCode::MULTI_STATUS
+            | StatusCode::ALREADY_REPORTED
+            | StatusCode::IM_USED => None,
+
+            // Client errors.
+            StatusCode::UNAUTHORIZED => Some(ErrorKind::Authentication(String::new())),
+            StatusCode::BAD_REQUEST => Some(ErrorKind::BadRequest(String::new())),
+            StatusCode::NOT_FOUND => Some(ErrorKind::NotFound(String::new())),
+            StatusCode::UNPROCESSABLE_ENTITY => Some(ErrorKind::UnprocessableEntity(String::new())),
+            StatusCode::REQUEST_TIMEOUT => Some(ErrorKind::RequestTimeout(String::new())),
+
+            // Retryable server errors.
+            StatusCode::TOO_MANY_REQUESTS => Some(ErrorKind::RateLimit(String::new())),
+            StatusCode::INTERNAL_SERVER_ERROR
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT => Some(ErrorKind::InternalServer(String::new())),
+
+            // Everything else.
+            _ if status.as_u16() == 529 => Some(ErrorKind::Overloaded(String::new())),
+            _ => Some(ErrorKind::Api {
+                status: status.as_u16(),
+                message: String::new(),
+            }),
+        }
+    }
+
+    /// Inject a message into an `ErrorKind` that was classified from the
+    /// status code. This avoids re-matching the status — the kind is already
+    /// determined, we just fill in the message.
+    fn with_message(kind: ErrorKind, message: String) -> ErrorKind {
+        match kind {
+            ErrorKind::Authentication(_) => ErrorKind::Authentication(message),
+            ErrorKind::BadRequest(_) => ErrorKind::BadRequest(message),
+            ErrorKind::NotFound(_) => ErrorKind::NotFound(message),
+            ErrorKind::UnprocessableEntity(_) => ErrorKind::UnprocessableEntity(message),
+            ErrorKind::RequestTimeout(_) => ErrorKind::RequestTimeout(message),
+            ErrorKind::RateLimit(_) => ErrorKind::RateLimit(message),
+            ErrorKind::InternalServer(_) => ErrorKind::InternalServer(message),
+            ErrorKind::Overloaded(_) => ErrorKind::Overloaded(message),
+            ErrorKind::Api { status, .. } => ErrorKind::Api { status, message },
+            other => other,
+        }
     }
 
     /// Try to extract a human-readable error message from the response body.
@@ -955,9 +1021,10 @@ async fn read_body_capped(
     Ok(bytes)
 }
 
-/// Build a `Timeout` error when the retry budget is exhausted before an
-/// attempt can even start. Uses the configured per-attempt timeout in the
-/// message so the caller sees what *would* have been used.
+/// Build a fallback error when the retry budget is exhausted before an
+/// attempt can even start and no prior error is available. This is a
+/// last resort — the retry loop normally returns the last real error
+/// from the server or network instead of this synthetic one.
 fn failure_on_budget_exhausted(retry: &RetryPolicy) -> TypeSafeError {
     TypeSafeError::new(ErrorKind::Timeout(retry.budget.unwrap_or(Duration::ZERO)))
 }

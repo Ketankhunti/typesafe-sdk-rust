@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-09-20
+
+### Fixed
+
+- **Budget cap no longer shortens the first attempt**: The retry budget now
+  only caps timeouts on *subsequent* attempts. The first attempt always uses
+  the full configured timeout, ensuring a tight budget doesn't prematurely
+  abort the initial request.
+- **Budget exhaustion returns the real error**: When the retry budget is
+  exhausted, the SDK now returns the last real server error (e.g. 500
+  `InternalServer`) instead of a synthetic `Timeout`. A minimum useful
+  window check also prevents sleeping when the remaining budget is too small
+  for another attempt.
+- **Blocking client works inside async contexts**: Replaced the overly broad
+  async-context guard with a helper-thread `block_on` strategy. The blocking
+  client can now be safely constructed, used, and dropped inside a Tokio
+  async context, including `spawn_blocking` threads. The runtime is shut down
+  in the background on `Drop` to avoid panics.
+- **Unified status classification**: All HTTP error statuses are now
+  classified by a single `kind_for_status()` helper, eliminating duplicated
+  status-matching logic. Non-retryable errors (401, 400, 404, etc.) that fail
+  to read their body now retain their correct `ErrorKind` instead of
+  degrading to `Transport`.
+- **`SystemOneResponse` Debug redaction**: The `answers` field is now redacted
+  in `Debug` output (it contains the same sensitive data as `raw`, which was
+  already redacted).
+- **CHANGELOG formatting**: Fixed an unclosed backtick in the 0.3.5 section.
+- **README LICENSE link**: Fixed broken `[LICENSE]` link that failed rustdoc
+  when the README was included as a doctest.
+
+### Changed
+
+- **`blocking` feature now requires `tokio/rt-multi-thread`**: The blocking
+  client uses a single-worker multi-threaded runtime so `Handle::block_on`
+  can drive the event loop from a helper thread when called inside an async
+  context.
+- **README is now a doctest**: Code samples in `README.md` are verified by
+  `cargo test --doc` via `#![doc = include_str!("../README.md")]`.
+- **CI improvements**: Cache key now hashes `Cargo.toml` (not git-ignored
+  `Cargo.lock`); MSRV job sets
+  `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`; security audit uses
+  the `rustsec/audit-check` action; added default-features clippy and test
+  steps.
+
+### Tests
+
+- Added `first_attempt_uses_full_timeout_not_budget` — verifies the first
+  attempt uses the full timeout even with a tight budget.
+- Added `budget_exhausted_returns_last_error_not_synthetic_timeout` — verifies
+  budget exhaustion returns the real error, not a synthetic `Timeout`.
+- Added 6 blocking-client tests for async-context safety (constructors,
+  methods, `spawn_blocking`, and `Drop`).
+- Renamed `maps_408_to_timeout_and_retries` →
+  `maps_408_to_request_timeout_and_retries` (stale name).
+
 ## [0.3.5] - 2026-09-19
 
 ### Fixed
@@ -26,7 +81,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   HTTP status *before* reading the body. A 503 with a body exceeding the 1 MiB
   cap is now correctly retried as `InternalServer` instead of becoming a
   non-retryable `Transport` error.
-- **HTTP 408 handling**: Added a dedicated `ErrorKind::RequestTimeout(String)
+- **HTTP 408 handling**: Added a dedicated `ErrorKind::RequestTimeout(String)`
   variant for 408 responses, instead of abusing `Timeout(Duration::ZERO)`. This
   separates server-side timeouts from client-side timeouts.
 - **Test thread cleanup**: Replaced 30-second `thread::sleep` calls in test

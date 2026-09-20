@@ -45,18 +45,18 @@ use crate::types::{ListModelsResponse, SystemOneResponse};
 /// Construct with [`BlockingClient::new`], [`BlockingClient::from_env`], or
 /// [`BlockingClient::from_config`].
 ///
-/// # Panics
+/// # Async-context safety
 ///
-/// The constructors and API methods return [`ErrorKind::Runtime`] instead
-/// of panicking when used from an async context. However, a `BlockingClient`
-/// created in synchronous code must also be dropped outside an async
-/// runtime because Tokio's runtime `Drop` implementation may panic if run
-/// inside another runtime. Construct and drop `BlockingClient` on the same
-/// (non-async) thread.
+/// The constructors and API methods are safe to call from inside a Tokio
+/// async context (including `spawn_blocking` threads). When a Tokio runtime
+/// is detected on the current thread, `block_on` is executed on a dedicated
+/// helper thread to avoid the "cannot start a runtime from within a runtime"
+/// panic. Dropping a `BlockingClient` inside an async context is also safe
+/// because the runtime is shut down in the background.
 #[non_exhaustive]
 pub struct BlockingClient {
     inner: TypeSafeClient,
-    runtime: tokio::runtime::Runtime,
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl fmt::Debug for BlockingClient {
@@ -68,25 +68,43 @@ impl fmt::Debug for BlockingClient {
 }
 
 impl BlockingClient {
-    /// Check whether the current thread is inside a Tokio async context.
-    /// Returns a `Runtime` error if so, so callers can avoid panicking.
-    fn guard_async_context() -> Result<()> {
+    /// Run a future to completion, blocking the calling thread.
+    ///
+    /// If the current thread is inside a Tokio runtime, `block_on` is
+    /// executed on a dedicated helper thread to avoid the "cannot start a
+    /// runtime from within a runtime" panic. This makes the blocking client
+    /// usable from `spawn_blocking` and other async-adjacent contexts.
+    fn block_on<F>(&self, future: F) -> F::Output
+    where
+        F: std::future::Future + Send,
+        F::Output: Send,
+    {
+        let runtime = self.runtime.as_ref().expect("runtime missing");
         if tokio::runtime::Handle::try_current().is_ok() {
-            Err(TypeSafeError::new(ErrorKind::Runtime(
-                "Cannot use a BlockingClient from inside an async context. \
-                 Use TypeSafeClient instead, or construct the BlockingClient \
-                 before entering the async runtime."
-                    .to_string(),
-            )))
+            // We're inside a Tokio runtime. Running `block_on` directly
+            // would panic, so spawn a helper thread, run the future there,
+            // and wait for the result.
+            let handle = runtime.handle().clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::scope(|scope| {
+                scope.spawn(move || {
+                    let result = handle.block_on(future);
+                    let _ = tx.send(result);
+                });
+                rx.recv().expect("helper thread panicked")
+            })
         } else {
-            Ok(())
+            runtime.block_on(future)
         }
     }
 
-    /// Build a current-thread Tokio runtime, returning a `Runtime` error on
-    /// failure.
+    /// Build a multi-threaded Tokio runtime, returning a `Runtime` error on
+    /// failure. A multi-threaded runtime is used so that `Handle::block_on`
+    /// can drive the event loop from a helper thread when the blocking
+    /// client is used inside an async context.
     fn build_runtime() -> Result<tokio::runtime::Runtime> {
-        tokio::runtime::Builder::new_current_thread()
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
             .enable_all()
             .build()
             .map_err(|e| {
@@ -113,14 +131,15 @@ impl BlockingClient {
     /// # Errors
     /// - [`ErrorKind::Validation`] if the API key is empty, the base URL
     ///   is invalid, or the default model name is empty.
-    /// - [`ErrorKind::Runtime`] if called from inside an async context or
-    ///   if the Tokio runtime cannot be created.
+    /// - [`ErrorKind::Runtime`] if the Tokio runtime cannot be created.
     #[must_use = "the returned client should be used to make API calls"]
     pub fn from_config(config: ClientConfig) -> Result<Self> {
-        Self::guard_async_context()?;
         let inner = TypeSafeClient::from_config(config)?;
         let runtime = Self::build_runtime()?;
-        Ok(Self { inner, runtime })
+        Ok(Self {
+            inner,
+            runtime: Some(runtime),
+        })
     }
 
     /// Create a new blocking client, reading the API key from the
@@ -129,14 +148,15 @@ impl BlockingClient {
     ///
     /// # Errors
     /// - [`ErrorKind::Validation`] if `TYPESAFE_API_KEY` is unset or empty.
-    /// - [`ErrorKind::Runtime`] if called from inside an async context or
-    ///   if the Tokio runtime cannot be created.
+    /// - [`ErrorKind::Runtime`] if the Tokio runtime cannot be created.
     #[must_use = "the returned client should be used to make API calls"]
     pub fn from_env() -> Result<Self> {
-        Self::guard_async_context()?;
         let inner = TypeSafeClient::from_env()?;
         let runtime = Self::build_runtime()?;
-        Ok(Self { inner, runtime })
+        Ok(Self {
+            inner,
+            runtime: Some(runtime),
+        })
     }
 
     /// Returns the base URL this client is configured to use.
@@ -156,60 +176,62 @@ impl BlockingClient {
     /// Blocks the calling thread until the response is received.
     ///
     /// # Errors
-    /// - [`ErrorKind::Runtime`] if called from inside an async context.
-    ///   See [`TypeSafeClient::system_one`] for the full list of error variants.
+    /// See [`TypeSafeClient::system_one`] for the full list of error variants.
     pub fn system_one(
         &self,
-        state: impl Into<Value>,
+        state: impl Into<Value> + Send,
         questions: HashMap<String, Question>,
     ) -> Result<SystemOneResponse> {
-        Self::guard_async_context()?;
-        self.runtime
-            .block_on(self.inner.system_one(state, questions))
+        self.block_on(self.inner.system_one(state, questions))
     }
 
     /// Like [`system_one`](Self::system_one) but with an explicit model
     /// override (`None` uses the client default).
     ///
     /// # Errors
-    /// - [`ErrorKind::Runtime`] if called from inside an async context.
-    ///   See [`TypeSafeClient::system_one_with_model`] for the full list of
-    ///   error variants.
+    /// See [`TypeSafeClient::system_one_with_model`] for the full list of
+    /// error variants.
     pub fn system_one_with_model(
         &self,
-        state: impl Into<Value>,
+        state: impl Into<Value> + Send,
         questions: HashMap<String, Question>,
         model: Option<&str>,
     ) -> Result<SystemOneResponse> {
-        Self::guard_async_context()?;
-        self.runtime
-            .block_on(self.inner.system_one_with_model(state, questions, model))
+        self.block_on(self.inner.system_one_with_model(state, questions, model))
     }
 
     /// Like [`system_one`](Self::system_one) but with full per-call options
     /// via a [`SystemOneOpts`] builder.
     ///
     /// # Errors
-    /// - [`ErrorKind::Runtime`] if called from inside an async context.
-    ///   See [`TypeSafeClient::system_one_with_opts`] for the full list of
-    ///   error variants.
+    /// See [`TypeSafeClient::system_one_with_opts`] for the full list of
+    /// error variants.
     pub fn system_one_with_opts(
         &self,
         questions: HashMap<String, Question>,
         opts: SystemOneOpts,
     ) -> Result<SystemOneResponse> {
-        Self::guard_async_context()?;
-        self.runtime
-            .block_on(self.inner.system_one_with_opts(questions, opts))
+        self.block_on(self.inner.system_one_with_opts(questions, opts))
     }
 
     /// List available models. Sends `GET /v1/models`.
     ///
     /// # Errors
-    /// - [`ErrorKind::Runtime`] if called from inside an async context.
-    ///   See [`TypeSafeClient::list_models`] for the full list of error variants.
+    /// See [`TypeSafeClient::list_models`] for the full list of error variants.
     pub fn list_models(&self) -> Result<ListModelsResponse> {
-        Self::guard_async_context()?;
-        self.runtime.block_on(self.inner.list_models())
+        self.block_on(self.inner.list_models())
+    }
+}
+
+impl Drop for BlockingClient {
+    fn drop(&mut self) {
+        // Shut down the runtime in the background so that dropping a
+        // `BlockingClient` inside an async context does not panic.
+        // `Runtime::drop` calls `block_on` internally to wait for tasks to
+        // finish, which panics if called from within a runtime. Using
+        // `shutdown_background()` avoids this by not blocking.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
     }
 }

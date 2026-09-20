@@ -190,7 +190,8 @@ impl fmt::Debug for SystemOneResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SystemOneResponse")
             .field("model", &self.model)
-            .field("answers", &self.answers)
+            // Redact answers — they may contain sensitive data (same as raw).
+            .field("answers", &"<redacted>")
             .field("usage", &self.usage)
             .field("request_id", &self.request_id)
             // Redact raw — it may contain sensitive data from the API response.

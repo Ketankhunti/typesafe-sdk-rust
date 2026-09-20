@@ -277,39 +277,29 @@ fn blocking_base_url_and_default_model_accessors() {
 }
 
 #[test]
-fn blocking_from_config_rejects_async_context() {
-    // When called from inside a Tokio runtime, from_config should return
-    // an ErrorKind::Runtime error instead of panicking.
+fn blocking_from_config_works_in_async_context() {
+    // When called from inside a Tokio runtime, from_config should succeed
+    // (no longer returns Runtime error — the blocking client now uses a
+    // helper thread for block_on when a runtime is detected).
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(async { BlockingClient::from_config(ClientConfig::new("test_key")) });
-
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err.kind(), ErrorKind::Runtime(msg) if msg.contains("async context")),
-        "expected Runtime error about async context, got: {err:?}"
-    );
+    assert!(result.is_ok(), "expected success, got: {:?}", result.err());
 }
 
 #[test]
-fn blocking_from_env_rejects_async_context() {
-    // When called from inside a Tokio runtime, from_env should return
-    // an ErrorKind::Runtime error instead of panicking.
+fn blocking_from_env_works_in_async_context() {
+    // When called from inside a Tokio runtime, from_env should succeed.
     std::env::set_var("TYPESAFE_API_KEY", "test_key");
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt.block_on(async { BlockingClient::from_env() });
-
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err.kind(), ErrorKind::Runtime(msg) if msg.contains("async context")),
-        "expected Runtime error about async context, got: {err:?}"
-    );
+    assert!(result.is_ok(), "expected success, got: {:?}", result.err());
     std::env::remove_var("TYPESAFE_API_KEY");
 }
 
 #[test]
-fn blocking_methods_reject_async_context() {
+fn blocking_methods_work_in_async_context() {
     // A client built in sync code, then used from inside an async context,
-    // should return an ErrorKind::Runtime error instead of panicking.
+    // should work correctly (no longer returns Runtime error).
     let server = MockServer::new();
     let handle = server.serve(vec![http_response(
         200,
@@ -322,16 +312,12 @@ fn blocking_methods_reject_async_context() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     let result = rt.block_on(async { client.system_one("test", billing_question()) });
-
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err.kind(), ErrorKind::Runtime(msg) if msg.contains("async context")),
-        "expected Runtime error about async context, got: {err:?}"
-    );
+    assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    assert_eq!(result.unwrap().model, "jev-latest");
 }
 
 #[test]
-fn blocking_list_models_rejects_async_context() {
+fn blocking_list_models_works_in_async_context() {
     let server = MockServer::new();
     let handle = server.serve(vec![http_response(
         200,
@@ -344,10 +330,50 @@ fn blocking_list_models_rejects_async_context() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     let result = rt.block_on(async { client.list_models() });
+    assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    assert_eq!(result.unwrap().models.len(), 1);
+}
 
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err.kind(), ErrorKind::Runtime(msg) if msg.contains("async context")),
-        "expected Runtime error about async context, got: {err:?}"
-    );
+#[test]
+fn blocking_works_in_spawn_blocking() {
+    // The blocking client should work from a spawn_blocking thread, which
+    // is the standard way to call blocking code from async.
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let client = blocking_client(&handle.url());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let result = rt.block_on(async {
+        tokio::task::spawn_blocking(move || client.system_one("test", billing_question()))
+            .await
+            .expect("spawn_blocking panicked")
+    });
+    assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    assert_eq!(result.unwrap().model, "jev-latest");
+}
+
+#[test]
+fn blocking_drop_in_async_context_does_not_panic() {
+    // Dropping a BlockingClient inside an async context should not panic.
+    let server = MockServer::new();
+    let handle = server.serve(vec![http_response(
+        200,
+        "OK",
+        "Content-Type: application/json\r\n",
+        &systemone_body(),
+    )]);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let client = blocking_client(&handle.url());
+        let _ = client.system_one("test", billing_question());
+        // Drop happens here, inside the async context.
+        // If this panics, the test fails.
+    });
 }

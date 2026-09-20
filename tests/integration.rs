@@ -412,7 +412,7 @@ fn maps_500_to_internal_server_error_and_retries() {
 /// HTTP 408 Request Timeout should be classified as a retryable
 /// `RequestTimeout` error, not a generic `Api` error.
 #[test]
-fn maps_408_to_timeout_and_retries() {
+fn maps_408_to_request_timeout_and_retries() {
     let server = MockServer::new();
     let handle = server.serve(vec![
         http_response(
@@ -1075,6 +1075,103 @@ fn budget_stops_retry_before_exceeding_limit() {
         start.elapsed()
     );
     assert!(matches!(err.kind(), ErrorKind::RateLimit(_)), "got {err:?}");
+}
+
+/// The first attempt must use the full configured timeout, even when a
+/// tight budget is set.  We simulate a slow server that takes longer
+/// than the budget but shorter than the per-call timeout — the first
+/// attempt should still succeed (not be cut short by the budget).
+#[test]
+fn first_attempt_uses_full_timeout_not_budget() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+
+    // Spawn a thread that accepts the connection, sleeps 300ms, then
+    // replies with a success response.
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let response = http_response(
+            200,
+            "OK",
+            "Content-Type: application/json\r\n",
+            &systemone_body(),
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+        // Keep the stream open briefly so the client can read.
+        std::thread::sleep(Duration::from_millis(100));
+    });
+
+    // Budget is 100ms — smaller than the 300ms the server takes — but the
+    // first attempt must use the full 5s timeout, so the request should
+    // succeed.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(format!("http://{addr}"))
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(RetryPolicy::new(0).with_budget(Some(Duration::from_millis(100))));
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap();
+
+    assert_eq!(result.model, "jev-latest");
+}
+
+/// When the budget is exhausted, the SDK should return the *last real
+/// error* from the server, not a synthetic `Timeout`.
+#[test]
+fn budget_exhausted_returns_last_error_not_synthetic_timeout() {
+    let server = MockServer::new();
+    // Server always returns 500 Internal Server Error.
+    let handle = server.serve(vec![
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+    ]);
+
+    // Very small budget (50ms) with large delays so the budget is
+    // exhausted before the first retry can happen.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(handle.url())
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(
+            RetryPolicy::new(5)
+                .with_base_delay(Duration::from_secs(10))
+                .with_max_delay(Duration::from_secs(60))
+                .with_budget(Some(Duration::from_millis(50))),
+        );
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+
+    // Must be the real 500 error, not a synthetic Timeout.
+    assert!(
+        matches!(err.kind(), ErrorKind::InternalServer(_)),
+        "expected InternalServer (last real error), got {err:?}"
+    );
 }
 
 #[test]

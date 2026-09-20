@@ -35,6 +35,9 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations)]
+// Include README.md as a doctest so code samples in the README are verified
+// by `cargo test --doc`.
+#![doc = include_str!("../README.md")]
 
 mod client;
 mod error;

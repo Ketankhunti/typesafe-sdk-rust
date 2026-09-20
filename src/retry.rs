@@ -30,7 +30,10 @@ pub struct RetryPolicy {
     /// Maximum delay between retries.
     pub max_delay: Duration,
     /// Total budget for all retries including delays. `None` means no budget.
-    /// When set, the retry loop stops *before* a delay that would exceed it.
+    /// When set, the retry loop stops *before* a delay that would exceed it,
+    /// and subsequent attempt timeouts are capped at the remaining budget.
+    /// The first attempt always uses the full configured timeout and is
+    /// not shortened by the budget.
     /// Default: 30 seconds, matching the Python SDK.
     pub budget: Option<Duration>,
 }
@@ -78,7 +81,9 @@ impl RetryPolicy {
     }
 
     /// Set the total retry budget. `None` disables the budget (unlimited).
-    /// When set, the retry loop stops *before* a delay that would exceed it.
+    /// When set, the retry loop stops *before* a delay that would exceed it,
+    /// and subsequent attempt timeouts are capped at the remaining budget.
+    /// The first attempt always uses the full configured timeout.
     #[must_use = "the returned RetryPolicy should be used"]
     pub fn with_budget(mut self, budget: Option<Duration>) -> Self {
         self.budget = budget;
