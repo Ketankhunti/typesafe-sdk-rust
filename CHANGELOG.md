@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-09-20
+
+### Fixed
+
+- **README Configuration doctest fails in CI**: The Configuration code block
+  calls `TypeSafeClient::from_env()` which fails when `TYPESAFE_API_KEY` is not
+  set (as in CI). Marked the code block as `no_run` so it compiles but does not
+  execute.
+
 ## [0.3.6] - 2026-09-20
 
 ### Fixed
