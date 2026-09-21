@@ -5,7 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-09-21
+
+### Fixed
+
+- **`noul()` doc was factually wrong**: Said "instructions defaults to null
+  when omitted" — carried over from the JS SDK. In Rust, `instructions` is a
+  required parameter. Updated to clarify it must be passed explicitly.
+- **`SystemOneResponse` exposed `request_id`/`raw` as both fields and methods**:
+  `resp.request_id` (field) and `resp.request_id()` (method) compiled to
+  different types, creating ambiguity. Fields are now `pub(crate)` — the
+  accessor methods (`request_id()`, `raw()`) are the only public API.
+  Same fix applied to `ListModelsResponse`.
+- **`From<reqwest::Error>` silently lost retryability**: The blanket `From`
+  impl mapped all `reqwest::Error` to non-retryable `Transport`, while the
+  real send path (`map_reqwest_error`) correctly classifies timeouts and
+  connection errors as retryable. Removed the `From` impl so future callers
+  can't accidentally bypass the correct classification.
+- **`ModelCard.description` and `Usage` fields lacked `#[serde(default)]`**:
+  If the API ever omitted one of these fields, every response would fail to
+  parse. Added `#[serde(default)]` to `Usage::input_tokens`,
+  `Usage::output_tokens`, and `ModelCard::description`.
+
+### Changed
+
+- **`SystemOneRequest` is no longer exported**: It was `pub` but
+  unconstructible by external users (due to `#[non_exhaustive]` with no public
+  constructor) and unused by any public method. Now `pub(crate)`.
+- **`SystemOneOpts::with_model` accepts `Option<impl Into<String>>`**: Was
+  `Option<String>`, inconsistent with `system_one_with_model` which takes
+  `Option<&str>`. Now accepts any `Option<impl Into<String>>` for flexibility.
+- **`examples/` is now included in the published crate**: Previously excluded
+  via `Cargo.toml` `exclude` list. The demo is the onboarding path and should
+  ship with the crate.
+- **`Cargo.toml` adds `documentation` field**: Points to `https://docs.rs/typesafeai-sdk`.
+- **`docs.rs` builds all features**: Added `[package.metadata.docs.rs]
+  all-features = true` so the `blocking` module is visible on docs.rs.
+
+### Added
+
+- **`Question` helper methods**: `is_noul()`, `is_choice()`, `is_score()`,
+  `as_noul()`, `as_choice()`, `as_score()` — mirroring the `Answer` helpers.
+- **`ScoreAnswer::score_index()`**: Returns the score as a `u32` index,
+  handling the `f64` → `u32` cast so callers don't hand-roll it.
+- **`#[must_use]` on all constructors**: `Noul::new`, `Choice::new`,
+  `Score::new`, `RetryPolicy::new`, `RetryPolicy::none`, `SystemOneOpts::new`,
+  and the free `noul()`, `choice()`, `score()` functions now warn if the
+  returned value is discarded.
+- **`Send + Sync` static assertions for `BlockingClient`**: Compile-time
+  guarantee that the blocking client remains `Send + Sync`.
+- **`SECURITY.md`**: Documents how to report vulnerabilities and the SDK's
+  security considerations (key redaction, TLS enforcement, redirect
+  prevention, body size cap).
+- **POST retry safety warning in README**: Documents that `system_one`
+  retries POSTs on transient failures, which may result in duplicate
+  processing if the server already processed the request.
+- **`jitter_seed` was unnecessarily `pub`**: Narrowed to `pub(crate)` — it's
+  an internal implementation detail, not part of the public API.
+- **`truncate` doc was misleading**: Said "at most `max_chars` characters"
+  but the returned string can be up to `max_chars + 3` because of the
+  appended `"..."` suffix. Doc now clarifies this.
+- **`ClientConfig::default()` produces an unusable client**: `api_key`
+  defaults to an empty string, which causes an authentication error on the
+  first request. Added a doc note pointing users to `ClientConfig::new` or
+  setting `api_key` explicitly.
+- **`ErrorKind::Api` didn't explain 3xx handling**: Added doc explaining
+  that 3xx responses fall into this variant, and that the default HTTP
+  client disables redirects to prevent POST replay on 307/308.
+- **Blocking `system_one`/`system_one_with_model` didn't document the
+  `Send` bound**: The `state` parameter requires `Send` because it's moved
+  to a helper thread. Added doc notes explaining this.
+
+### Changed
+
+- **Version bumped to 0.4.0**: This release contains breaking changes —
+  `From<reqwest::Error>` was removed and `SystemOneRequest` was made
+  `pub(crate)`. Per Semantic Versioning, these warrant a minor version bump
+  pre-1.0.
 
 ## [0.3.8] - 2026-09-20
 
@@ -22,8 +98,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to accurately describe the blocking behavior and recommend
   `TypeSafeClient` or `spawn_blocking` for async code.
 - **Helper thread panic was swallowed**: `expect("helper thread panicked")`
-  hid the original panic message. Now uses `match` on `recv()` with a
-  `resume_unwind`-style panic message.
+  hid the original panic message. Now uses `ScopedJoinHandle::join()` and
+  `std::panic::resume_unwind` to propagate the original panic payload to
+  callers (including `catch_unwind`), instead of a synthetic message.
+
+### Changed
+
+- **`BlockingClient` methods now take `state: impl Into<Value> + Send`**: The
+  `system_one` and `system_one_with_model` methods on `BlockingClient` now
+  accept `impl Into<Value> + Send` for the `state` parameter, matching the
+  async `TypeSafeClient` API. This is a minor breaking change from 0.3.5
+  where `state` was `&str`.
 
 ### Added
 
@@ -356,7 +441,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests (19) and doc tests (5) — all passing.
 - README, LICENSE, and CONTRIBUTING guide.
 
-[Unreleased]: https://github.com/Ketankhunti/typesafe-sdk-rust/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Ketankhunti/typesafe-sdk-rust/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.4.0
+[0.3.8]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.8
+[0.3.7]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.7
+[0.3.6]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.6
+[0.3.5]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.5
+[0.3.4]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.4
+[0.3.3]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.3
+[0.3.2]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.2
+[0.3.1]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.1.0

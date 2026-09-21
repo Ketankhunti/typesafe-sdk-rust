@@ -115,6 +115,13 @@ pub struct ClientConfig {
 }
 
 impl Default for ClientConfig {
+    /// Create a `ClientConfig` with all fields at their defaults.
+    ///
+    /// **Note:** `api_key` defaults to an empty string, which will cause
+    /// [`TypeSafeClient::from_config`] to return an
+    /// [`Authentication`](ErrorKind::Authentication) error on the first
+    /// request. Use [`ClientConfig::new`] or set `api_key` explicitly
+    /// before constructing a client.
     fn default() -> Self {
         Self {
             api_key: String::new(),
@@ -333,14 +340,15 @@ impl fmt::Debug for SystemOneOpts {
 
 impl SystemOneOpts {
     /// Create a new empty options set (all fields use client defaults).
+    #[must_use = "the returned SystemOneOpts should be used"]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Override the model for this call. `None` uses the client default.
     #[must_use = "the returned SystemOneOpts should be used"]
-    pub fn with_model(mut self, model: Option<String>) -> Self {
-        self.model = model;
+    pub fn with_model(mut self, model: Option<impl Into<String>>) -> Self {
+        self.model = model.map(|m| m.into());
         self
     }
 
@@ -562,9 +570,7 @@ impl TypeSafeClient {
         questions: HashMap<String, Question>,
         model: Option<&str>,
     ) -> Result<SystemOneResponse> {
-        let opts = SystemOneOpts::new()
-            .with_model(model.map(|m| m.to_string()))
-            .with_state(state);
+        let opts = SystemOneOpts::new().with_model(model).with_state(state);
         self.system_one_with_opts(questions, opts).await
     }
 
@@ -698,10 +704,11 @@ impl TypeSafeClient {
                         let remaining = budget.saturating_sub(started.elapsed());
                         if remaining.is_zero() {
                             // Budget exhausted — return the last real error,
-                            // not a synthetic Timeout.
-                            return Err(
-                                last_error.unwrap_or_else(|| failure_on_budget_exhausted(retry))
-                            );
+                            // not a synthetic Timeout. `last_error` is always
+                            // `Some` here because this branch only runs on
+                            // retries (attempt > 0), and `last_error` is set
+                            // before every sleep.
+                            return Err(last_error.expect("last_error must be set on a retry"));
                         }
                         std::cmp::min(timeout, remaining)
                     }
@@ -1018,14 +1025,6 @@ async fn read_body_capped(
     Ok(bytes)
 }
 
-/// Build a fallback error when the retry budget is exhausted before an
-/// attempt can even start and no prior error is available. This is a
-/// last resort — the retry loop normally returns the last real error
-/// from the server or network instead of this synthetic one.
-fn failure_on_budget_exhausted(retry: &RetryPolicy) -> TypeSafeError {
-    TypeSafeError::new(ErrorKind::Timeout(retry.budget.unwrap_or(Duration::ZERO)))
-}
-
 /// Map a `reqwest` error to the appropriate `TypeSafeError` variant.
 ///
 /// - timeouts -> [`ErrorKind::Timeout`], reporting the *configured* timeout
@@ -1069,9 +1068,10 @@ fn parse_retry_after_ms(value: &str) -> Option<Duration> {
     value.trim().parse::<u64>().ok().map(Duration::from_millis)
 }
 
-/// Truncate a string to at most `max_chars` *characters*, appending "..." if
-/// anything was cut. Slicing at a char boundary means non-ASCII bodies can't
-/// cause a panic.
+/// Truncate a string to at most `max_chars` *characters*, appending "..."
+/// (3 chars) if anything was cut — so the returned string can be up to
+/// `max_chars + 3` characters long. Slicing at a char boundary means
+/// non-ASCII bodies can't cause a panic.
 fn truncate(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
         Some((idx, _)) => format!("{}...", &s[..idx]),

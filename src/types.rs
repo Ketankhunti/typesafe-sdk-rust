@@ -23,7 +23,7 @@ use crate::questions::Question;
 /// - `questions` — non-empty map of question names to question objects.
 #[derive(Clone, Serialize)]
 #[non_exhaustive]
-pub struct SystemOneRequest {
+pub(crate) struct SystemOneRequest {
     /// Text, a JSON object, or an array to evaluate.
     pub state: Value,
     /// The model name or alias (e.g. `"jev-latest"`).
@@ -52,12 +52,14 @@ impl fmt::Debug for SystemOneRequest {
 // ---------------------------------------------------------------------------
 
 /// Token usage for a request.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[non_exhaustive]
 pub struct Usage {
     /// Number of input tokens consumed.
+    #[serde(default)]
     pub input_tokens: u64,
     /// Number of output tokens generated.
+    #[serde(default)]
     pub output_tokens: u64,
 }
 
@@ -94,6 +96,23 @@ pub struct ScoreAnswer {
     pub probabilities: HashMap<String, f64>,
     /// Confidence score in `[0, 1]`.
     pub confidence: f64,
+}
+
+impl ScoreAnswer {
+    /// Returns the score as a `u32` index, truncating the fractional part.
+    ///
+    /// The API returns the score as a float (e.g. `0.0`, `1.0`), but it
+    /// represents a 0-indexed integer. This helper does the cast so callers
+    /// don't have to hand-roll `f64` → `u32` conversion.
+    ///
+    /// Returns `0` if the score is negative (which should not happen in
+    /// practice but is handled defensively).
+    pub fn score_index(&self) -> u32 {
+        if self.score < 0.0 {
+            return 0;
+        }
+        self.score as u32
+    }
 }
 
 /// An answer to a single question, identified by its `type` field.
@@ -179,11 +198,11 @@ pub struct SystemOneResponse {
     /// The request ID returned by the server (from the
     /// `x-typesafe-request-id` response header), if present.
     #[serde(default)]
-    pub request_id: Option<String>,
+    pub(crate) request_id: Option<String>,
     /// The raw JSON body of the response, injected after deserialization.
     /// Useful for accessing fields the SDK doesn't yet model.
     #[serde(skip)]
-    pub raw: Option<Value>,
+    pub(crate) raw: Option<Value>,
 }
 
 impl fmt::Debug for SystemOneResponse {
@@ -265,6 +284,7 @@ pub struct ModelCard {
     /// The model name or alias.
     pub name: String,
     /// Human-readable description of the model.
+    #[serde(default)]
     pub description: String,
     /// Release date of the model, if available.
     #[serde(default)]
@@ -280,10 +300,10 @@ pub struct ListModelsResponse {
     /// The request ID returned by the server (from the
     /// `x-typesafe-request-id` response header), if present.
     #[serde(default)]
-    pub request_id: Option<String>,
+    pub(crate) request_id: Option<String>,
     /// The raw JSON body of the response, injected after deserialization.
     #[serde(skip)]
-    pub raw: Option<Value>,
+    pub(crate) raw: Option<Value>,
 }
 
 impl fmt::Debug for ListModelsResponse {

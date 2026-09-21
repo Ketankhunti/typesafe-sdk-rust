@@ -65,6 +65,7 @@ impl Noul {
     /// `instructions` can be a string, `null`, or any JSON value.
     /// Pass [`serde_json::Value::Null`] to explicitly send `null` as the
     /// instructions (the API default).
+    #[must_use = "the returned Noul should be used"]
     pub fn new(instructions: impl Into<Value>) -> Self {
         Self {
             instructions: Some(instructions.into()),
@@ -103,6 +104,7 @@ impl Choice {
     /// Create a new choice question with the given instructions and criteria.
     ///
     /// `criteria` is a map of label → description (or `None` for undescribed).
+    #[must_use = "the returned Choice should be used"]
     pub fn new(instructions: impl Into<Value>, criteria: HashMap<String, Description>) -> Self {
         Self {
             instructions: Some(instructions.into()),
@@ -135,6 +137,7 @@ impl Score {
     /// Create a new score question with the given instructions and criteria.
     ///
     /// `criteria` must have at least two entries.
+    #[must_use = "the returned Score should be used"]
     pub fn new(instructions: impl Into<Value>, criteria: Vec<Description>) -> Self {
         Self {
             instructions: Some(instructions.into()),
@@ -183,19 +186,68 @@ impl From<Score> for Question {
     }
 }
 
+impl Question {
+    /// Returns `true` if this is a noul question.
+    pub fn is_noul(&self) -> bool {
+        matches!(self, Question::Noul(_))
+    }
+
+    /// Returns `true` if this is a choice question.
+    pub fn is_choice(&self) -> bool {
+        matches!(self, Question::Choice(_))
+    }
+
+    /// Returns `true` if this is a score question.
+    pub fn is_score(&self) -> bool {
+        matches!(self, Question::Score(_))
+    }
+
+    /// Returns the noul question if this is one.
+    pub fn as_noul(&self) -> Option<&Noul> {
+        if let Question::Noul(n) = self {
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the choice question if this is one.
+    pub fn as_choice(&self) -> Option<&Choice> {
+        if let Question::Choice(c) = self {
+            Some(c)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the score question if this is one.
+    pub fn as_score(&self) -> Option<&Score> {
+        if let Question::Score(s) = self {
+            Some(s)
+        } else {
+            None
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Builder functions (mirrors the JS SDK's `noul()`, `choice()`, `score()`)
 // ---------------------------------------------------------------------------
 
-/// Build a yes/no question. `instructions` defaults to `null` when omitted.
+/// Build a yes/no question.
+///
+/// `instructions` is required — pass a string, `serde_json::Value::Null`,
+/// or any JSON value. To omit instructions on the wire, pass
+/// [`serde_json::Value::Null`].
 ///
 /// # Examples
 /// ```
 /// use typesafeai_sdk::noul;
 ///
 /// let q = noul("Is this about billing?");
-/// let q = noul(serde_json::Value::Null); // no instructions
+/// let q = noul(serde_json::Value::Null); // null instructions
 /// ```
+#[must_use = "the returned Noul should be used"]
 pub fn noul(instructions: impl Into<Value>) -> Noul {
     Noul::new(instructions)
 }
@@ -212,6 +264,7 @@ pub fn noul(instructions: impl Into<Value>) -> Noul {
 /// criteria.insert("angry".to_string(), None);
 /// let q = choice("What is the tone?", criteria);
 /// ```
+#[must_use = "the returned Choice should be used"]
 pub fn choice(instructions: impl Into<Value>, criteria: HashMap<String, Description>) -> Choice {
     Choice::new(instructions, criteria)
 }
@@ -225,6 +278,7 @@ pub fn choice(instructions: impl Into<Value>, criteria: HashMap<String, Descript
 ///
 /// let q = score("How urgent?", vec![None, Some("high".into())]);
 /// ```
+#[must_use = "the returned Score should be used"]
 pub fn score(instructions: impl Into<Value>, criteria: Vec<Description>) -> Score {
     Score::new(instructions, criteria)
 }

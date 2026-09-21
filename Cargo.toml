@@ -1,6 +1,6 @@
 [package]
 name = "typesafeai-sdk"
-version = "0.3.8"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
@@ -8,13 +8,13 @@ description = "Rust SDK for TypeSafe AI — typed judgments from System One mode
 readme = "README.md"
 homepage = "https://typesafe.ai"
 repository = "https://github.com/Ketankhunti/typesafe-sdk-rust"
+documentation = "https://docs.rs/typesafeai-sdk"
 authors = ["Ketan Khunti <khuntiketan50@gmail.com>"]
 keywords = ["ai", "typesafe", "jev", "system-one", "classification"]
 categories = ["api-bindings", "web-programming::http-client"]
 exclude = [
     "target/",
     ".github/",
-    "examples/",
 ]
 
 [dependencies]
@@ -34,3 +34,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 [[test]]
 name = "blocking"
 required-features = ["blocking"]
+
+[package.metadata.docs.rs]
+all-features = true

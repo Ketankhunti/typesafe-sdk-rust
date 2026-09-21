@@ -187,6 +187,20 @@ The SDK automatically retries on `429 Too Many Requests`, `529 Overloaded`,
 and `500`/`502`/`503`/`504` server errors, as well as network timeouts and
 connection failures, with exponential backoff and equal jitter.
 
+### Retry safety for POST requests
+
+`system_one` is a `POST` request. The SDK retries on transient failures
+(timeouts, 5xx, 429), but a client-side timeout does **not** guarantee the
+server did not process the request. If the endpoint has side effects (credit
+consumption, usage recording), a retry may result in duplicate processing.
+
+To mitigate this, errors that occur while *reading the response body* —
+including timeouts and truncated bodies — are classified as non-retryable
+so the SDK won't replay a POST whose body the server already received.
+
+Future versions will support an `Idempotency-Key` header to make retries
+fully safe.
+
 ## License
 
 MIT

@@ -41,7 +41,8 @@ use crate::types::{ListModelsResponse, SystemOneResponse};
 /// Wraps an async [`TypeSafeClient`] with a dedicated multi-threaded Tokio
 /// runtime (one worker thread). Each method call blocks the calling thread
 /// until the response is received — up to the configured timeout multiplied
-/// by the number of retries (potentially 30 s or more).
+/// by (retries + 1), with retries bounded by the budget (potentially 30 s or
+/// more).
 ///
 /// Construct with [`BlockingClient::new`], [`BlockingClient::from_env`], or
 /// [`BlockingClient::from_config`].
@@ -95,16 +96,31 @@ impl BlockingClient {
             // and wait for the result.
             let handle = runtime.handle().clone();
             let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::scope(|scope| {
-                scope.spawn(move || {
+            // The scope closure returns the result of `join()`, which is
+            // `Result<F::Output, Box<dyn Any + Send>>`.  If the helper
+            // thread panicked, `join()` gives us the panic payload so we
+            // can `resume_unwind` it — preserving the original error for
+            // `catch_unwind` callers instead of a synthetic message.
+            let join_result = std::thread::scope(|scope| {
+                let join_handle = scope.spawn(move || {
                     let result = handle.block_on(future);
                     let _ = tx.send(result);
                 });
+                // Wait for the channel result first. If `recv()` fails,
+                // the helper thread panicked, so we `join()` to recover
+                // the panic payload.
                 match rx.recv() {
-                    Ok(result) => result,
-                    Err(_) => panic!("helper thread panicked"),
+                    Ok(result) => Ok(result),
+                    Err(_) => Err(join_handle.join()),
                 }
-            })
+            });
+            match join_result {
+                Ok(result) => result,
+                Err(join_err) => match join_err {
+                    Err(payload) => std::panic::resume_unwind(payload),
+                    Ok(_) => panic!("helper thread exited without sending a result"),
+                },
+            }
         } else {
             runtime.block_on(future)
         }
@@ -187,6 +203,9 @@ impl BlockingClient {
     ///
     /// Blocks the calling thread until the response is received.
     ///
+    /// The `state` parameter requires [`Send`] because it is moved to a
+    /// helper thread where the Tokio runtime executes the future.
+    ///
     /// # Errors
     /// See [`TypeSafeClient::system_one`] for the full list of error variants.
     pub fn system_one(
@@ -199,6 +218,9 @@ impl BlockingClient {
 
     /// Like [`system_one`](Self::system_one) but with an explicit model
     /// override (`None` uses the client default).
+    ///
+    /// The `state` parameter requires [`Send`] because it is moved to a
+    /// helper thread where the Tokio runtime executes the future.
     ///
     /// # Errors
     /// See [`TypeSafeClient::system_one_with_model`] for the full list of
@@ -247,3 +269,16 @@ impl Drop for BlockingClient {
         }
     }
 }
+
+// Static assertion that the blocking client is `Send + Sync`. The blocking
+// client's soundness story depends on being usable from any thread (it owns
+// a dedicated runtime). The `where` clause is verified at definition time, so
+// if a future change breaks this bound, compilation will fail.
+const _: () = {
+    #[allow(dead_code)]
+    fn _assert_blocking_client_send_sync()
+    where
+        BlockingClient: Send + Sync,
+    {
+    }
+};

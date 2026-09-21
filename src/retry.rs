@@ -11,7 +11,7 @@ use std::time::Duration;
 /// Generate a randomly seeded value suitable for jitter. Uses the standard
 /// library's `RandomState` hasher, which is seeded from the OS RNG at
 /// construction time, without pulling in a `rand` dependency.
-pub fn jitter_seed() -> u64 {
+pub(crate) fn jitter_seed() -> u64 {
     RandomState::new().build_hasher().finish()
 }
 
@@ -51,6 +51,7 @@ impl Default for RetryPolicy {
 
 impl RetryPolicy {
     /// Create a retry policy with the given number of max retries.
+    #[must_use = "the returned RetryPolicy should be used"]
     pub fn new(max_retries: u32) -> Self {
         Self {
             max_retries,
@@ -59,6 +60,7 @@ impl RetryPolicy {
     }
 
     /// Create a retry policy that never retries (max_retries = 0).
+    #[must_use = "the returned RetryPolicy should be used"]
     pub fn none() -> Self {
         Self {
             max_retries: 0,

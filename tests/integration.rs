@@ -1123,6 +1123,10 @@ fn first_attempt_uses_full_timeout_not_budget() {
 
 /// When the budget is exhausted, the SDK should return the *last real
 /// error* from the server, not a synthetic `Timeout`.
+///
+/// This test exercises the pre-sleep `budget_exceeded` check: the base
+/// delay (10 s) exceeds the 50 ms budget, so the loop stops before
+/// sleeping and returns the 500 error from the first attempt.
 #[test]
 fn budget_exhausted_returns_last_error_not_synthetic_timeout() {
     let server = MockServer::new();
@@ -1172,6 +1176,142 @@ fn budget_exhausted_returns_last_error_not_synthetic_timeout() {
         matches!(err.kind(), ErrorKind::InternalServer(_)),
         "expected InternalServer (last real error), got {err:?}"
     );
+}
+
+/// When the budget is exhausted *during* a retry attempt (while the
+/// request is in flight), the loop-top exhaustion branch should return
+/// the last real error, not a synthetic `Timeout`.
+///
+/// This exercises the `remaining.is_zero()` check at the top of the retry
+/// loop (attempt > 0), which is distinct from the pre-sleep
+/// `budget_exceeded` check.  We use a server that responds quickly with
+/// 500s and a tiny delay so the budget runs out between attempts.
+#[test]
+fn budget_exhausted_at_loop_top_returns_last_error() {
+    let server = MockServer::new();
+    // Server always returns 500 quickly.
+    let handle = server.serve(vec![
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+    ]);
+
+    // Budget of 80ms with 1ms delays.  The first attempt succeeds quickly
+    // (server responds immediately with 500).  The delay is tiny (1ms),
+    // so the pre-sleep checks pass.  But after a couple of fast retries
+    // the 80ms budget is consumed by elapsed time, and the loop-top
+    // `remaining.is_zero()` branch fires on the next retry.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(handle.url())
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(
+            RetryPolicy::new(10)
+                .with_base_delay(Duration::from_millis(1))
+                .with_max_delay(Duration::from_millis(1))
+                .with_budget(Some(Duration::from_millis(80))),
+        );
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let start = Instant::now();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+    let elapsed = start.elapsed();
+
+    // Should stop quickly — well within the 5s timeout.
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "budget not enforced at loop top, took {elapsed:?}"
+    );
+    // Must be the real 500 error, not a synthetic Timeout.
+    assert!(
+        matches!(err.kind(), ErrorKind::InternalServer(_)),
+        "expected InternalServer (last real error), got {err:?}"
+    );
+}
+
+/// When the remaining budget after a delay is too small for a useful
+/// attempt (less than 10% of the timeout or 100ms), the SDK should skip
+/// the retry and return the last real error instead of sleeping and
+/// timing out.
+#[test]
+fn minimum_window_check_skips_retry_when_budget_too_small() {
+    let server = MockServer::new();
+    // Server always returns 500.
+    let handle = server.serve(vec![
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+        http_response(
+            500,
+            "Internal Server Error",
+            "Content-Type: application/json\r\n",
+            r#"{"error":{"message":"server crash"}}"#,
+        ),
+    ]);
+
+    // Timeout is 5 s, so the minimum window is max(100ms, 500ms) = 500ms.
+    // Budget is 200ms with a 1ms delay.  After the first 500 error, the
+    // delay (1ms) passes the budget_exceeded check (200ms > 1ms elapsed).
+    // But remaining_after_delay = 200ms - ~1ms = ~199ms, which is less
+    // than the 500ms minimum window, so the retry is skipped.
+    let config = ClientConfig::new("test_key")
+        .with_base_url(handle.url())
+        .with_default_model("jev-latest")
+        .with_timeout(Duration::from_secs(5))
+        .with_retry(
+            RetryPolicy::new(5)
+                .with_base_delay(Duration::from_millis(1))
+                .with_max_delay(Duration::from_millis(1))
+                .with_budget(Some(Duration::from_millis(200))),
+        );
+    let client = TypeSafeClient::from_config(config).unwrap();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let start = Instant::now();
+    let err = rt
+        .block_on(async { client.system_one("test", billing_question()).await })
+        .unwrap_err();
+    let elapsed = start.elapsed();
+
+    // Should stop almost immediately — no retry was attempted.
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "minimum window check did not skip retry, took {elapsed:?}"
+    );
+    // Must be the real 500 error, not a synthetic Timeout.
+    assert!(
+        matches!(err.kind(), ErrorKind::InternalServer(_)),
+        "expected InternalServer (last real error), got {err:?}"
+    );
+    // Only one request should have been made (no retry).
+    assert_eq!(handle.request_count(), 1);
 }
 
 #[test]

@@ -3,29 +3,8 @@
 //! Rust SDK for [TypeSafe AI](https://typesafe.ai) — typed judgments from
 //! System One models like Jev.
 //!
-//! ## Quickstart
-//!
-//! Set `TYPESAFE_API_KEY` in your environment, then:
-//!
-//! ```no_run
-//! use typesafeai_sdk::{TypeSafeClient, noul, choice, score, Question};
-//! use std::collections::HashMap;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let client = TypeSafeClient::from_env()?;
-//!
-//!     let mut questions: HashMap<String, Question> = HashMap::new();
-//!     questions.insert("billing".to_string(), noul("Is this about billing?").into());
-//!
-//!     let response = client.system_one("I was charged twice. Please help.", questions).await?;
-//!
-//!     if let Some(answer) = response.noul("billing") {
-//!         println!("Billing probability: {}", answer.noul);
-//!     }
-//!     Ok(())
-//! }
-//! ```
+//! See the [Quickstart](#quickstart) below or the full
+//! [primitives documentation](#primitives) in the README.
 //!
 //! ## Primitives
 //!
@@ -55,7 +34,7 @@ pub use questions::{
 };
 pub use retry::RetryPolicy;
 pub use types::{
-    Answer, ChoiceAnswer, ListModelsResponse, ModelCard, NoulAnswer, ScoreAnswer, SystemOneRequest,
+    Answer, ChoiceAnswer, ListModelsResponse, ModelCard, NoulAnswer, ScoreAnswer,
     SystemOneResponse, Usage,
 };
 

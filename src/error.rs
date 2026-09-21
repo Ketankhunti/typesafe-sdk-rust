@@ -50,6 +50,12 @@ pub enum ErrorKind {
     RequestTimeout(String),
 
     /// A generic API error for unexpected HTTP status codes.
+    ///
+    /// This includes 3xx redirect responses — the SDK's default HTTP client
+    /// disables redirects (via `reqwest::redirect::Policy::none()`) to
+    /// prevent POST body replay on 307/308. If you supply a custom
+    /// `reqwest::Client` that follows redirects, 3xx responses will not
+    /// appear here because reqwest follows them automatically.
     #[error("API error (status {status}): {message}")]
     Api {
         /// The HTTP status code.
@@ -178,12 +184,6 @@ impl std::error::Error for TypeSafeError {}
 impl From<serde_json::Error> for TypeSafeError {
     fn from(e: serde_json::Error) -> Self {
         Self::new(ErrorKind::Json(e))
-    }
-}
-
-impl From<reqwest::Error> for TypeSafeError {
-    fn from(e: reqwest::Error) -> Self {
-        Self::new(ErrorKind::Transport(e.to_string()))
     }
 }
 
