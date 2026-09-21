@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-09-21
+
+### Fixed
+
+- **README installation version was stale**: Showed `"0.3"` instead of
+  `"0.4"` in the `Cargo.toml` dependency example.
+
 ## [0.4.0] - 2026-09-21
 
 ### Fixed
@@ -441,7 +448,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Unit tests (19) and doc tests (5) — all passing.
 - README, LICENSE, and CONTRIBUTING guide.
 
-[Unreleased]: https://github.com/Ketankhunti/typesafe-sdk-rust/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Ketankhunti/typesafe-sdk-rust/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.4.0
 [0.3.8]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.8
 [0.3.7]: https://github.com/Ketankhunti/typesafe-sdk-rust/releases/tag/v0.3.7
