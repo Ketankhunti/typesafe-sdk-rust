@@ -16,7 +16,7 @@ branch on, rank with, or feed into downstream logic.
 
 ```toml
 [dependencies]
-typesafeai-sdk = "0.3"
+typesafeai-sdk = "0.4"
 ```
 
 > Requires Rust 1.88+ and uses `rustls-tls` (no OpenSSL dependency).
